@@ -243,7 +243,131 @@ Spring Boot inverts this: **your app owns `main()` and starts an embedded Tomcat
 
 ### 4.1 Modern language
 
-_Written in Phase 01._
+**What it is.** The core language, plus the features added since Java 8 that change how modern code looks. Every example is a JUnit test in [`java-core/src/test/java/dev/playground/core/language/`](../java-core/src/test/java/dev/playground/core/language/), and the small types it uses are in the matching [`src/main`](../java-core/src/main/java/dev/playground/core/language/) package. Run them all with `./mvnw -pl java-core test`, or one class with `-Dtest=RecordsTest`. Break an assertion and see what happens.
+
+| Feature | Since Java | Example |
+|---|---|---|
+| Generics, enums, autoboxing, for-each | 5 | `GenericsTest`, `EnumsTest` |
+| Lambdas, `default`/`static` interface methods | 8 | `ClassesAndInterfacesTest` |
+| `var` | 10 | `VarAndTextBlocksTest` |
+| `String.isBlank/strip/repeat/lines` | 11 | `StringsAndEqualityTest` |
+| Switch expressions (`case X ->`) | 14 | `EnumsTest` |
+| Text blocks (`"""`) | 15 | `VarAndTextBlocksTest` |
+| Records, `instanceof` patterns | 16 | `RecordsTest`, `SealedAndPatternsTest` |
+| Sealed classes and interfaces | 17 | `SealedAndPatternsTest` |
+| Pattern `switch`, record patterns, `getFirst()` | 21 | `SealedAndPatternsTest`, `GenericMethods` |
+| Unnamed variables and patterns (`_`) | 22 | `ExceptionsTest`, `Shapes` |
+| Code before `super(...)` / `this(...)` (flexible constructor bodies) | 25 | `Rect` |
+
+A job ad saying "Java 8+" usually means the code base is somewhere between 8 and 17. Java 8 code has no `var`, and code before Java 16 has no records or pattern matching, so expect getters, setters and explicit casts there (chapter 13 covers the legacy look).
+
+#### Classes, interfaces, abstract classes — `ClassesAndInterfacesTest`
+
+A class has fields, constructors and methods. Constructors can chain with `this(...)` or call the parent with `super(...)`. Until Java 24 that call had to be the first statement; since Java 25 code that does not read `this` may run before it, which is handy for validating arguments first (`Rect`), and methods can be **overloaded** (same name, different parameters). A `static` field belongs to the class, so there is one copy shared by every instance.
+
+**Access modifiers** differ from C#. The default, with no keyword, is *package-private*: visible to the same package only. There is no `internal`, because the package is the unit of encapsulation.
+
+Since Java 8, interfaces can have `default` methods (an inherited implementation) and `static` methods (called on the interface, never inherited):
+
+```java
+public interface Figure {
+    double area();
+    String name();
+    default String describe() { return String.format(Locale.ROOT, "%s with area %.2f", name(), area()); }
+    static double totalArea(List<? extends Figure> figures) { ... }
+}
+```
+
+An **abstract class** can also hold state and constructors, but a class extends only one (and implements any number of interfaces). Use an interface for the contract and an abstract class only when there is real shared state or code. `Rect` overrides `describe()` and reuses the inherited default through `super.describe()`. An **anonymous class** implements an interface inline. When the interface has a single abstract method, a lambda does the same job (chapter 02).
+
+#### Generics — `GenericsTest`
+
+`Box<T>` and `GenericMethods.max` show generic classes and methods. `<T extends Comparable<T>>` is a *bounded* type parameter: T must be comparable, so `compareTo` is available.
+
+**Wildcards** exist because `List<Integer>` is **not** a `List<Number>`. You cannot pass one where the other is expected. PECS (*Producer Extends, Consumer Super*) tells you which wildcard to use:
+
+```java
+static double sum(List<? extends Number> numbers)                  // reads Numbers: List<Integer>, List<Double>...
+static void fillWithIntegers(List<? super Integer> target, int n)   // writes Integers: List<Number>, List<Object>...
+```
+
+**Type erasure**: the type arguments exist only at compile time. At runtime `ArrayList<String>` and `ArrayList<Integer>` are the same class, so `new T()`, `T.class` and `obj instanceof List<String>` (with `obj` declared as `Object`) do not compile. C# generics are *reified* (kept at runtime), which is why `typeof(T)` works there. A **raw type** (`List` with no `<...>`) is the pre-Java-5 style. It only earns a compiler warning, and the resulting `ClassCastException` shows up far from the cause.
+
+#### Records — `RecordsTest`
+
+```java
+public record Isbn(String value) {
+    public Isbn {                                  // compact constructor
+        Objects.requireNonNull(value, "value");
+        value = value.replace("-", "");            // normalise before the field is assigned
+        if (!value.matches("\\d{10}|\\d{13}")) throw new IllegalArgumentException(...);
+    }
+}
+```
+
+A record is an immutable data carrier. The compiler generates the constructor, the accessors, `equals`/`hashCode` (by value) and `toString` (`Isbn[value=0134685997]`). Accessors are called `value()`, not `getValue()`, which matters for libraries that expect JavaBeans getters. Records cannot extend classes and cannot declare extra instance fields, but they can implement interfaces and have methods.
+
+Records are only **shallowly** immutable. A `List` component can still be changed through the reference (`LeakyShelf`), so copy it in the constructor with `List.copyOf` (`Shelf`). In this project, records are the DTOs of the API (chapter 05 on).
+
+#### Enums — `EnumsTest`
+
+A Java enum is a class: each constant is a singleton object that can have fields, a constructor and methods (`Genre.FANTASY.label()`). `values()` returns the constants in declaration order. `valueOf("SCIENCE")` is case-sensitive and throws on an unknown name. `==` is safe for enums because each constant exists once. `EnumMap`/`EnumSet` are the fast collections keyed by an enum.
+
+A **switch expression** over an enum that lists every constant needs no `default`, so adding a constant later becomes a compile error at every switch expression that forgot it. An old-style switch *statement* compiles anyway and silently skips the new constant. Do not persist `ordinal()`: reordering the constants changes it (that is why JPA offers `EnumType.STRING`, see chapter 07).
+
+#### Sealed types and pattern matching — `SealedAndPatternsTest`, `Shapes`
+
+```java
+public sealed interface Shape permits Circle, Square, Rectangle {}
+public record Circle(double radius) implements Shape {}
+
+static double area(Shape shape) {
+    return switch (shape) {                       // no default: the compiler knows all Shapes
+        case Circle c -> Math.PI * c.radius() * c.radius();
+        case Square s -> s.side() * s.side();
+        case Rectangle(double width, double height) -> width * height;   // record pattern
+    };
+}
+```
+
+- `sealed ... permits` closes the hierarchy. The compiler can then check that a `switch` is exhaustive.
+- `obj instanceof Circle c` tests and casts in one step.
+- A **record pattern** `Rectangle(var w, var h)` deconstructs the record.
+- A **guard** `case Circle c when c.radius() > 10` refines a case. Cases run top to bottom, so the guarded case goes first; the other way round, the compiler rejects the guarded case as *dominated* (unreachable).
+- A switch over `Object` needs `default` (or an unconditional `case Object o`). It can also handle `case null` (otherwise null throws `NullPointerException`).
+- `_` (Java 22) names something you will not use: `case Square _ ->`, `catch (NumberFormatException _)`, `try (var _ = ...)`.
+
+This style (data in records, behaviour in exhaustive switches) is the Java counterpart of discriminated unions.
+
+#### `var` and text blocks — `VarAndTextBlocksTest`
+
+`var` infers a **local** variable's type from its initializer. The type is still static, as in C#. It is not allowed for fields, method parameters or return types, or without an initializer (lambda parameters are fine); the test's header lists what does not compile. Watch out for `var list = new ArrayList<>()`: with no type on either side it becomes `ArrayList<Object>`.
+
+A text block `"""` is a multi-line string. The indentation common to all lines, including the closing `"""`, is removed. A `\` at the end of a line joins it with the next, and `\s` keeps a trailing space. Use `"...".formatted(args)` to fill it in. In later chapters, text blocks hold JSON in tests and JPQL in `@Query`.
+
+#### Exceptions — `ExceptionsTest`
+
+- **Checked exceptions** (subclasses of `Exception` that are not `RuntimeException`, such as `IOException`) must be caught or declared with `throws`, or the code does not compile. **Unchecked** ones (`RuntimeException` and subclasses) need neither. C# only has the unchecked kind.
+- Modern code, and Spring in particular, uses unchecked exceptions for almost everything. The `java.util.function` interfaces behind stream lambdas declare no checked exceptions, so checked ones get wrapped: `throw new UncheckedIOException(e)`. Always pass the original exception as the cause.
+- **try-with-resources** (`try (var r = ...) { }`) closes every `AutoCloseable`, last opened first, even when the body throws. It is C#'s `using`. If `close()` also throws, that exception is attached to the main one as *suppressed* (`getSuppressed()`), not lost.
+- `finally` always runs, even after a `return`. Never `return` from `finally`: it silently discards any exception.
+- Multi-catch: `catch (NumberFormatException | ArithmeticException _)`.
+
+#### Strings and equality — `StringsAndEqualityTest`
+
+`==` compares **references** for every non-primitive type. Compare values with `equals`.
+
+- Equal string literals share one pooled object, so `"java" == "java"` is true. That is why `==` bugs pass small tests.
+- `new String(...)` and runtime concatenation create new objects.
+- Autoboxing caches `Integer` values from -128 to 127: `Integer a = 127, b = 127; a == b` is true, but by default it is false for 128 (the JLS only guarantees the cache for -128..127; `-XX:AutoBoxCacheMax` can widen it).
+- Unboxing a `null` `Integer` into an `int` throws `NullPointerException`. A typical source is `map.get(missingKey)`.
+- Strings are immutable. Use `StringBuilder` to build one in a loop.
+
+**Gotchas**
+- `String.format("%.2f", x)` follows the machine's locale, so a Spanish Windows prints `6,00`. Pass `Locale.ROOT` for machine-readable output.
+- Palantir Java Format (the formatter in this build) cannot parse a bare `_` inside a record pattern yet (`Rectangle(var w, _)`), so the code uses the equivalent `var _`.
+- A record's accessor is `name()`, not `getName()`. Some older libraries only understand getters.
+- `List.of(...)`, `List.copyOf(...)` and records with copied lists are unmodifiable: `add` throws `UnsupportedOperationException` at runtime, not at compile time.
 
 ### 4.2 Collections & functional
 
@@ -331,7 +455,25 @@ A map for orientation, not a claim that the pieces are identical. It grows with 
 | Kestrel | Embedded Tomcat | |
 | `Program.cs` + `WebApplication.CreateBuilder` | `@SpringBootApplication` class + `main` | |
 | IIS hosting an app | `.war` deployed to a standalone Tomcat | The legacy model |
+| `record` / `record class` | `record` | Java record fields are always final (shallowly immutable); records cannot inherit; no `with` expressions |
+| `sealed` class (blocks inheritance) | `final` class | Java's `sealed` means something else: see the next row |
+| Closed hierarchies, F# discriminated unions | `sealed interface ... permits` + records | The compiler checks `switch` exhaustiveness |
+| `switch` expression, `is` patterns | `switch` expression, `instanceof` / record patterns | Very close; guards use `when` in both |
+| `enum` (named integers) | `enum` (a class with singleton instances) | Java enums can have fields, constructors and methods |
+| Generics (reified: `typeof(T)` works) | Generics (erased at runtime) | No `new T()`, no `T.class`; wildcards `? extends` / `? super` instead of `out` / `in` variance |
+| `var` | `var` | Same idea; Java only allows it for locals and lambda parameters |
+| Raw string literals `"""` | Text blocks `"""` | Similar indentation rules, but Java processes escapes (`\n`, `\s`, `\` at line end) and keeps the final newline when the closing `"""` is on its own line |
+| `using` statement | try-with-resources | `IDisposable` ↔ `AutoCloseable` |
+| Exceptions (all unchecked) | Checked and unchecked exceptions | Checked ones must be caught or declared with `throws` |
+| `internal` | package-private (no modifier) | Java's default visibility is the package, not private |
+| `==` on `string` compares values | `==` compares references; use `equals` | See "Things that trip you up" |
+| Boxed `int` (`object`, `int?`) | `Integer` (wrapper class) | `==` on two `Integer`s compares references: true inside the -128..127 cache, false outside |
 
 ### Things that trip you up
 
-_Filled in chapter by chapter._
+- **`==` on objects.** `==` on `String`, `Integer` and any other object compares references. Small tests often pass by accident (the string pool, the `Integer` cache from -128 to 127). Use `equals`.
+- **Checked exceptions.** A method that calls `Files.readString` does not compile until you catch `IOException` or add `throws IOException`. The `java.util.function` interfaces (and so stream lambdas) cannot throw them, so they get wrapped in unchecked exceptions.
+- **Type erasure.** `List<String>` and `List<Integer>` are the same class at runtime, so reflection-based code (JSON libraries, Spring) sometimes needs a hint such as a `ParameterizedTypeReference`.
+- **Default visibility.** Forgetting `public` makes a member package-private, not private.
+- **No properties.** Java has fields plus methods. Records give you `name()` accessors. Classes use `getName()`/`setName()` by convention (JavaBeans).
+- **Locale-sensitive formatting.** `String.format` and `toUpperCase()` use the machine's locale unless you pass `Locale.ROOT`.
