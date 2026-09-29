@@ -371,7 +371,145 @@ A text block `"""` is a multi-line string. The indentation common to all lines, 
 
 ### 4.2 Collections & functional
 
-_Written in Phase 02._
+**What it is.** The collections library (`java.util`), lambdas and the Streams API. Together they are Java's `List<T>` + `Dictionary` + LINQ. The examples are in [`collections/`](../java-core/src/test/java/dev/playground/core/collections/) and [`functional/`](../java-core/src/test/java/dev/playground/core/functional/) under `java-core/src/test/java/dev/playground/core/`, with their small types in the matching `src/main` packages. Run them with `./mvnw -pl java-core test -Dtest=StreamsTest` (or any other class name).
+
+**Why it matters.** Almost every service method filters, groups or maps a collection, and Spring Data returns `List` and `Optional`. Streams replace most hand-written loops in modern code.
+
+#### The collection family — `CollectionsTest`
+
+Declare variables with the **interface** and choose the **class** for its behaviour: `List<String> titles = new ArrayList<>();`.
+
+| Interface | Class | Order | Notes |
+|---|---|---|---|
+| `List` | `ArrayList` | insertion | The default list. O(1) `get(i)` |
+| | `LinkedList` | insertion | Also a `Deque`. Rarely the right choice; use `ArrayDeque` for queues |
+| `Set` | `HashSet` | none | The default set |
+| | `LinkedHashSet` | insertion | |
+| | `TreeSet` | sorted | Uses `compareTo` or a `Comparator` |
+| `Map` | `HashMap` | none | The default map |
+| | `LinkedHashMap` | insertion | |
+| | `TreeMap` | sorted by key | Also a `NavigableMap`: `firstKey`, `headMap`… |
+
+Three kinds of "read-only" list look alike but behave differently:
+
+```java
+List.of("a", "b")                       // unmodifiable, rejects nulls
+Collections.unmodifiableList(source)    // a read-only *view*: changes to source show through
+List.copyOf(source)                     // an unmodifiable *copy*: a snapshot (also rejects nulls)
+```
+
+All three are still of type `List`, so `add` compiles and throws `UnsupportedOperationException` at runtime. Java has no `IReadOnlyList` in the type system. `Arrays.asList(array)` is different again: fixed size, but `set` writes through to the array.
+
+The `Map` helpers replace the get/check/put dance:
+
+```java
+stock.getOrDefault("Emma", 0);
+stock.merge("Dune", 1, Integer::sum);                               // count
+byAuthor.computeIfAbsent(author, _ -> new ArrayList<>()).add(title); // multimap
+```
+
+Removing from a list inside a for-each loop throws `ConcurrentModificationException`: the iterator notices the change. Use `list.removeIf(predicate)`.
+
+#### equals, hashCode and ordering — `EqualsHashCodeTest`
+
+**How it works.** `HashSet` and `HashMap` use `hashCode()` to pick a bucket, and inside it they compare the stored hash first and only then call `equals()`. The contract is that equal objects must have equal hash codes.
+
+- `BrokenBookKey` overrides only `equals`. Two equal keys keep their (almost certainly different) identity hash codes, so `contains` with an equal key returns false.
+- `BookKey` overrides both, using the same fields: `Objects.hash(isbn, edition)`. A record would generate both for you.
+- `MutableBookKey` is correct but mutable. Changing a field after adding the object to a `HashSet` strands it: the set filed it under the old hash, so lookups with the new one miss. Keep keys immutable.
+
+**Ordering** has two mechanisms. `Comparable` is the type's own *natural order* (`compareTo`), used by `TreeSet`, `TreeMap` and `sort()` with no arguments. A `Comparator` is any other order, built by composition:
+
+```java
+keys.sort(Comparator.comparingInt(BookKey::edition).reversed().thenComparing(BookKey::isbn));
+titles.sort(Comparator.nullsLast(Comparator.naturalOrder()));
+```
+
+`TreeSet` treats `compareTo(...) == 0` as "duplicate", so keep `compareTo` consistent with `equals`.
+
+#### Lambdas and method references — `LambdasTest`
+
+A lambda implements a **functional interface**, an interface with exactly one abstract method. The standard ones are in `java.util.function`:
+
+| Interface | Shape | Method | C# |
+|---|---|---|---|
+| `Function<T,R>` | `T -> R` | `apply` | `Func<T,TResult>` |
+| `BiFunction<T,U,R>` | `(T,U) -> R` | `apply` | `Func<T1,T2,TResult>` |
+| `UnaryOperator<T>` | `T -> T` | `apply` | `Func<T,T>` |
+| `Predicate<T>` | `T -> boolean` | `test` | `Predicate<T>` / `Func<T,bool>` |
+| `Supplier<T>` | `() -> T` | `get` | `Func<T>` |
+| `Consumer<T>` | `T -> void` | `accept` | `Action<T>` |
+
+There are also primitive versions (`IntFunction`, `ToIntFunction`, `IntPredicate`…) that avoid boxing. Functions compose (`f.andThen(g)` is g(f(x)), `f.compose(g)` is f(g(x))), and predicates combine with `and`, `or`, `negate` and `Predicate.not`.
+
+You can declare your own functional interface (`PriceRule`). Add `@FunctionalInterface` so the compiler rejects a second abstract method.
+
+A **method reference** is shorthand for a lambda that only calls one method:
+
+| Kind | Example | Equivalent lambda |
+|---|---|---|
+| Static | `Integer::parseInt` | `s -> Integer.parseInt(s)` |
+| Bound instance | `prefix::concat` | `s -> prefix.concat(s)` |
+| Unbound instance | `String::toUpperCase` | `s -> s.toUpperCase()` |
+| Constructor | `StringBuilder::new` | `s -> new StringBuilder(s)` |
+
+A lambda can read local variables only if they are **effectively final** (never reassigned), so `count++` inside a lambda does not compile. The `java.util.function` interfaces declare no checked exceptions, so `Files::readString` is not a `Function<Path,String>`. `CheckedFunctions.unchecked(...)` wraps it and rethrows the `IOException` as `UncheckedIOException`.
+
+#### Streams — `StreamsTest`
+
+A stream is a pipeline: a **source** (`list.stream()`), lazy **intermediate** operations (`filter`, `map`, `sorted`…) and one **terminal** operation (`toList`, `collect`, `count`, `findFirst`…) that runs it all.
+
+```java
+List<String> titles = books.stream()
+        .filter(b -> b.year() > 1950)
+        .sorted(Comparator.comparingInt(BookSample::year))
+        .map(BookSample::title)
+        .limit(3)
+        .toList();
+```
+
+Grouping uses `Collectors`, and a *downstream* collector decides what each group holds:
+
+```java
+Map<Genre, Long> perGenre = books.stream()
+        .collect(groupingBy(BookSample::genre, () -> new EnumMap<>(Genre.class), counting()));
+Map<String, List<String>> titlesByAuthor = books.stream()
+        .collect(groupingBy(BookSample::author, TreeMap::new, mapping(BookSample::title, Collectors.toList())));
+```
+
+Also in the test:
+- `partitioningBy` splits into `true`/`false`.
+- `joining(", ", "[", "]")` builds a string.
+- `flatMap` flattens nested lists.
+- `reduce` folds values together; `mapToInt(...).sum()` and `summaryStatistics()` do the same on primitives, without boxing.
+- `IntStream.range(0, 5)` replaces a counting loop.
+- `toMap` throws on duplicate keys unless you pass a merge function.
+
+**Laziness.** Nothing runs until the terminal operation. Elements then flow through the whole pipeline **one at a time**, so `findFirst` stops as soon as it finds a match: in the test only 2 of the 8 books are visited. `peek` exists for debugging exactly this. Do not rely on it for side effects, though: since Java 9 `count()` on a list with no `filter` in between just returns the size, and `peek` never runs (`countMaySkipThePipelineWhenTheSizeIsKnown`).
+
+**Single use.** A stream can be consumed only once. A second terminal operation throws `IllegalStateException`. Keep the collection and call `stream()` again.
+
+#### Optional — `OptionalTest`
+
+`Optional<T>` is a **return type** that says "maybe no result" (`BookCatalog.findByTitle`, Spring Data's `findById`).
+
+```java
+catalog.findByTitle("Dune Messiah")
+        .map(BookSample::author)              // runs only if present, like ?.
+        .flatMap(catalog::findFirstByAuthor)  // the function returns an Optional itself
+        .map(BookSample::title)
+        .orElseThrow(() -> new IllegalArgumentException("not found"));
+```
+
+- `orElse(x)` evaluates `x` **always**, even when a value is present. `orElseGet(() -> x)` evaluates it only when empty. That matters when `x` is expensive or has side effects.
+- `Optional.of(null)` throws. Use `Optional.ofNullable` for values that may be null.
+- Do not use `Optional` for fields or method parameters, and do not wrap collections in it: return an empty list instead of `Optional<List<T>>`.
+
+**Gotchas**
+- `Stream.toList()` (Java 16) returns an unmodifiable list (which, unlike `List.of`, accepts nulls). `Collectors.toList()` does not promise either way. When you need to add to the result, collect with `toCollection(ArrayList::new)`.
+- `Collectors.toMap` throws `IllegalStateException: Duplicate key` unless you pass a merge function.
+- A `HashSet` or `HashMap` iterates in an unspecified order that can change between runs or JDK versions. Do not write tests that depend on it; use `LinkedHash*` or `Tree*` when order matters.
+- `map.get(key)` returns `null` for a missing key. Unboxing that `null` into an `int` throws `NullPointerException`.
 
 ### 4.3 Concurrency
 
@@ -468,6 +606,33 @@ A map for orientation, not a claim that the pieces are identical. It grows with 
 | `internal` | package-private (no modifier) | Java's default visibility is the package, not private |
 | `==` on `string` compares values | `==` compares references; use `equals` | See "Things that trip you up" |
 | Boxed `int` (`object`, `int?`) | `Integer` (wrapper class) | `==` on two `Integer`s compares references: true inside the -128..127 cache, false outside |
+| `List<T>` / `Dictionary<K,V>` / `HashSet<T>` | `ArrayList` / `HashMap` / `HashSet` (declared as `List` / `Map` / `Set`) | Java declares variables by interface by convention |
+| `SortedDictionary` / `SortedSet` | `TreeMap` / `TreeSet` | |
+| `IReadOnlyList<T>` / `ReadOnlyCollection<T>` (a read-only view) | `Collections.unmodifiableList(list)` | Changes to the underlying list show through. Still typed as `List`: `add` compiles and throws at runtime |
+| `ImmutableList<T>` (a snapshot) | `List.of(...)`, `List.copyOf(list)` | Rejects nulls. Same runtime-only protection |
+| `Equals` + `GetHashCode` (`IEquatable<T>`) | `equals` + `hashCode` | Same contract; records generate both |
+| `IComparable<T>` / `IComparer<T>` | `Comparable<T>` / `Comparator<T>` | `Comparator.comparing(...).thenComparing(...)` ↔ `OrderBy(...).ThenBy(...)` |
+| `Func<...>` / `Action<T>` / `Predicate<T>` | `Function`, `BiFunction`, `Supplier` / `Consumer` / `Predicate` | Java uses ordinary (generic) interfaces instead of delegate types |
+| Delegates, method groups | Functional interfaces, method references (`String::length`) | |
+| LINQ to Objects | Streams API | Both lazy. No query syntax, and a stream is single-use (see below) |
+| Nullable reference types (`string?`), `?.`, `??` | `Optional<T>` with `map`, `orElse` | Only for return values; fields and parameters are plain (nullable) references |
+
+**LINQ ↔ Streams**
+
+| LINQ | Streams |
+|---|---|
+| `Where` | `filter` |
+| `Select` | `map` |
+| `SelectMany` | `flatMap` |
+| `OrderBy` / `ThenBy` | `sorted(Comparator.comparing(...).thenComparing(...))` |
+| `Take` / `Skip` | `limit` / `skip` |
+| `Distinct` | `distinct` |
+| `First()` / `FirstOrDefault()` | `findFirst().orElseThrow()` / `findFirst().orElse(null)` (or keep the `Optional`) |
+| `Any` / `All` | `anyMatch` / `allMatch` |
+| `Count` / `Sum` / `Aggregate` | `count` / `mapToInt(...).sum()` / `reduce` |
+| `GroupBy` | `collect(groupingBy(...))` |
+| `ToList` / `ToDictionary` | `toList()` / `collect(toMap(...))` |
+| `string.Join` | `collect(joining(", "))` |
 
 ### Things that trip you up
 
@@ -477,3 +642,5 @@ A map for orientation, not a claim that the pieces are identical. It grows with 
 - **Default visibility.** Forgetting `public` makes a member package-private, not private.
 - **No properties.** Java has fields plus methods. Records give you `name()` accessors. Classes use `getName()`/`setName()` by convention (JavaBeans).
 - **Locale-sensitive formatting.** `String.format` and `toUpperCase()` use the machine's locale unless you pass `Locale.ROOT`.
+- **Streams are single-use.** An `IEnumerable` can be enumerated again. A second terminal operation on a stream throws `IllegalStateException`, so store the collection, not the stream.
+- **Read-only collections are a runtime property.** `List.of(...)` and `stream.toList()` return a `List` that throws on `add`. The compiler does not help.
