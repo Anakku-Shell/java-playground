@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Root (parent) POM — the equivalent of a .sln that also holds shared build settings.
+  Guide: §2 Project anatomy.
+
+  - packaging "pom": this project produces no jar itself; it only aggregates the modules
+    and passes configuration down to them.
+  - Inheriting from spring-boot-starter-parent gives every module Spring Boot's dependency
+    management (the BOM: tested versions of JUnit, AssertJ, Jackson, Hibernate...) and sensible
+    plugin defaults. java-core inherits it too, but only to get those test library versions:
+    it declares no Spring dependency.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>4.1.1</version>
+        <relativePath/> <!-- look the parent up in Maven Central, not in a parent folder -->
+    </parent>
+
+    <groupId>dev.playground</groupId>
+    <artifactId>java-playground</artifactId>
+    <version>0.0.1-SNAPSHOT</version>
+    <packaging>pom</packaging>
+    <name>java-playground</name>
+    <description>Playground to learn modern Java and Spring Boot</description>
+
+    <!-- Build order is resolved from dependencies, not from this list. -->
+    <modules>
+        <module>java-core</module>
+        <module>spring-app</module>
+    </modules>
+
+    <properties>
+        <!-- Read by spring-boot-starter-parent to set maven.compiler.release. -->
+        <java.version>25</java.version>
+        <!-- Versions of tools the Spring Boot BOM does not manage. -->
+        <spotless.version>3.10.3</spotless.version>
+        <palantir-java-format.version>2.100.0</palantir-java-format.version>
+    </properties>
+
+    <build>
+        <plugins>
+            <!--
+              Spotless: the "Prettier" of this repo. `./mvnw spotless:apply` formats the code;
+              `check` runs in the verify phase and fails the build on unformatted code.
+            -->
+            <plugin>
+                <groupId>com.diffplug.spotless</groupId>
+                <artifactId>spotless-maven-plugin</artifactId>
+                <version>${spotless.version}</version>
+                <configuration>
+                    <!-- LF everywhere (matches .gitattributes); otherwise Windows would expect CRLF. -->
+                    <lineEndings>UNIX</lineEndings>
+                    <java>
+                        <palantirJavaFormat>
+                            <version>${palantir-java-format.version}</version>
+                        </palantirJavaFormat>
+                        <removeUnusedImports/>
+                        <trimTrailingWhitespace/>
+                        <endWithNewline/>
+                    </java>
+                </configuration>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>check</goal>
+                        </goals>
+                        <phase>verify</phase>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <!--
+              Surefire (configured by the parent) runs *Test classes in the `test` phase.
+              Failsafe runs *IT classes (integration tests) in `integration-test` and fails the
+              build in `verify`, so a plain `./mvnw test` stays fast and Docker-free.
+              spring-boot-starter-parent already binds both goals in its pluginManagement;
+              listing the plugin here is what activates it.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+</project>

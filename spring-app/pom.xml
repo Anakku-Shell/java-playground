@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  spring-app: the library REST API. Dependencies are added phase by phase.
+  Starters are curated dependency bundles; since Spring Boot 4 they are split per technology
+  (webmvc, data-jpa, flyway...), each with a matching "-test" starter for its test slice.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>dev.playground</groupId>
+        <artifactId>java-playground</artifactId>
+        <version>0.0.1-SNAPSHOT</version>
+    </parent>
+
+    <artifactId>spring-app</artifactId>
+    <name>spring-app</name>
+    <description>Library REST API built with Spring Boot</description>
+
+    <properties>
+        <!-- Empty default so @{argLine} below resolves; JaCoCo (Phase 11) prepends its agent here. -->
+        <argLine/>
+    </properties>
+
+    <dependencies>
+        <!-- Spring MVC + Jackson + embedded Tomcat. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-webmvc</artifactId>
+        </dependency>
+
+        <!-- JUnit, AssertJ, Mockito, Spring Test and the MVC test slice. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-webmvc-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!--
+              Mockito instruments classes through a Java agent. Loading it dynamically at runtime
+              prints a warning on recent JDKs (and will be blocked in a future release), so the
+              agent is passed explicitly to the test JVMs. The `properties` goal exposes each
+              dependency's jar path as a property such as ${org.mockito:mockito-core:jar}.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-dependency-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>properties</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <configuration>
+                    <argLine>@{argLine} -javaagent:${org.mockito:mockito-core:jar}</argLine>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <configuration>
+                    <argLine>@{argLine} -javaagent:${org.mockito:mockito-core:jar}</argLine>
+                </configuration>
+            </plugin>
+            <!-- Adds `spring-boot:run` and repackages the jar into an executable "fat jar". -->
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+</project>

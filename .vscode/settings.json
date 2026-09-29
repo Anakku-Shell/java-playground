@@ -1,0 +1,9 @@
+{
+  // Re-import the Maven projects automatically when a pom.xml changes.
+  "java.configuration.updateBuildConfiguration": "automatic",
+  // Spotless (./mvnw spotless:apply) owns Java formatting; the editor must not fight it.
+  "[java]": {
+    "editor.formatOnSave": false
+  },
+  "files.eol": "\n"
+}

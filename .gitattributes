@@ -1,0 +1,11 @@
+# LF in the repo and in the working tree (Spotless checks for LF too).
+* text=auto eol=lf
+
+# Windows scripts need CRLF to run in cmd.exe.
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# The Unix wrapper script must keep LF.
+mvnw text eol=lf
+
+*.jar binary

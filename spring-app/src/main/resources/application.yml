@@ -1,0 +1,8 @@
+# Main configuration. Profile-specific files (application-dev.yml...) override these values.
+# Guide: §5.1 Spring Boot fundamentals.
+spring:
+  application:
+    name: library
+
+server:
+  port: 8080
