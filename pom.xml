@@ -40,6 +40,8 @@
         <!-- Versions of tools the Spring Boot BOM does not manage. -->
         <spotless.version>3.10.3</spotless.version>
         <palantir-java-format.version>2.100.0</palantir-java-format.version>
+        <!-- springdoc is not in the Boot BOM: 3.x is the line for Spring Boot 4. -->
+        <springdoc.version>3.1.1</springdoc.version>
     </properties>
 
     <build>

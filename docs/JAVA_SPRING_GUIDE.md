@@ -235,7 +235,7 @@ Spring Boot inverts this: **your app owns `main()` and starts an embedded Tomcat
 
 ### Where the playground is right now
 
-`LibraryApplication` starts and Tomcat listens on port 8080. The only endpoints are `GET /api/info` and `GET /api/info/greetings` from §5.1; every other URL answers **404**. `LibraryApplicationTest` (`@SpringBootTest`) boots the same context in a test, so a broken configuration fails the build.
+`LibraryApplication` starts and Tomcat listens on port 8080. It serves `/api/info` (§5.1), CRUD for `/api/authors` and `/api/books` kept in memory (§5.2), and Swagger UI at `/swagger-ui.html`. `LibraryApplicationTest` (`@SpringBootTest`) boots the same context in a test, so a broken configuration fails the build.
 
 ---
 
@@ -769,7 +769,125 @@ Slices keep tests fast and focused. `@SpringBootTest` with no `classes` starts t
 
 ### 5.2 REST API
 
-_Written in Phase 05._
+**What it is.** CRUD endpoints for authors and books with Spring MVC, JSON through Jackson, and an OpenAPI document with Swagger UI. Storage is still in memory; §5.4 swaps it for PostgreSQL without touching the controllers. The code is in [`author/`](../spring-app/src/main/java/dev/playground/library/author/) and [`book/`](../spring-app/src/main/java/dev/playground/library/book/), plus `config/OpenApiConfig`. Requests: [`http/05-rest.http`](../spring-app/http/05-rest.http).
+
+**Why it matters.** This layering (controller → service → repository, with DTOs at the edge) is the shape of almost every Spring API you will work on.
+
+#### One feature, one package
+
+```
+book/
+  BookController   HTTP only: paths, status codes, headers
+  BookService      use cases; takes and returns DTOs
+  BookRepository   storage (a ConcurrentHashMap for now, Spring Data JPA from §5.4)
+  Book             the stored object: a plain class now, a JPA entity from §5.4
+  BookMapper       static Book ↔ DTO methods, written by hand
+  dto/             BookResponse, CreateBookRequest, UpdateBookRequest, AuthorSummary (records)
+```
+
+**Why DTOs.** The API returns `BookResponse`, never `Book`. The stored class can change (new columns, lazy JPA relations, internal fields) without changing the JSON contract. Separate request and response records also stop a client from setting fields it should not, such as `id` or `availableCopies`. The service does the mapping, so `Book` never leaves it.
+
+#### Controllers — `AuthorControllerTest`, `BookControllerTest`
+
+`@RestController` is `@Controller` + `@ResponseBody`: every method's return value is written to the response body (as JSON), instead of naming a view template to render.
+
+```java
+@RestController
+@RequestMapping("/api/books")
+public class BookController {
+
+    @GetMapping("/{id}")                                   // GET /api/books/1
+    public BookResponse get(@PathVariable Long id) { ... }
+
+    @PostMapping                                           // POST /api/books
+    public ResponseEntity<BookResponse> create(@RequestBody CreateBookRequest request) {
+        BookResponse created = service.create(request);
+        URI location = ServletUriComponentsBuilder.fromCurrentRequest()
+                .path("/{id}").buildAndExpand(created.id()).toUri();
+        return ResponseEntity.created(location).body(created);   // 201 + Location header
+    }
+
+    @DeleteMapping("/{id}")
+    @ResponseStatus(HttpStatus.NO_CONTENT)                 // 204, empty body
+    public void delete(@PathVariable Long id) { ... }
+}
+```
+
+| Annotation | Binds |
+|---|---|
+| `@PathVariable Long id` | A segment of the path: `/api/books/{id}` |
+| `@RequestParam String name` | A query parameter: `?name=Ada` (`defaultValue`, `required = false` for optional ones) |
+| `@RequestBody CreateBookRequest request` | The JSON body, read by Jackson |
+| `@RequestHeader`, `@CookieValue` | A header or a cookie |
+
+Return a plain object for `200 OK`. Use `ResponseEntity<T>` when you need to set the status or headers yourself, and `@ResponseStatus` for a fixed status.
+
+| Operation | Status |
+|---|---|
+| `GET` list / one | `200`, or `404` for a missing id |
+| `POST` | `201 Created` + `Location` + the new resource |
+| `PUT` (full replacement) | `200` + the updated resource |
+| `DELETE` | `204 No Content` |
+
+**For now, a missing id** is a `ResponseStatusException(HttpStatus.NOT_FOUND, "Book 7 not found")` thrown by the service. It works, but the service now knows about HTTP, and the response body is Spring Boot's generic error JSON (`timestamp`, `status`, `error`, `path`), without the message. §5.3 replaces both with a domain exception and a `ProblemDetail`.
+
+Spring answers some errors **before your method runs**; the controller tests pin them (each also checks that the service was never called):
+
+| Request | Status |
+|---|---|
+| Body that is not valid JSON | `400` (`HttpMessageNotReadableException`) |
+| A missing or `null` value for a primitive field (`int totalCopies`) | `400` (Jackson 3, see below) |
+| `/api/books/abc` for a `Long` id | `400` (type mismatch) |
+| `Content-Type: text/plain` on a JSON endpoint | `415 Unsupported Media Type` |
+| A method the path does not map (`PATCH`) | `405 Method Not Allowed` |
+
+One arrives **after** the method: `Accept: application/xml` → `406 Not Acceptable`. The mappings declare no `produces`, so the request matches, the method runs, and only writing the result fails. Add `produces = MediaType.APPLICATION_JSON_VALUE` to a mapping to reject it up front.
+
+The 415 and 406 cases are **content negotiation**. Spring picks an `HttpMessageConverter` from the request's `Content-Type` (to read) and `Accept` (to write) headers. The API speaks JSON, plus YAML by accident: springdoc brings in Jackson 2's YAML module, and Spring registers a YAML converter whenever that module is on the classpath (`Accept: application/yaml` works, through a separate Jackson 2 mapper that Spring Boot does not configure).
+
+#### JSON with Jackson
+
+Records map to JSON field by field, in declaration order. `null` components are written as `null`. **Unknown properties** in a request are dropped silently: that is Jackson 3's default (with Jackson 2, Spring Boot switched the failure off for you). A **missing** field becomes `null` for an object type (`Integer birthYear`). For a primitive (`int totalCopies`) Jackson 3 **rejects** a missing or `null` value with a 400 (`FAIL_ON_NULL_FOR_PRIMITIVES` is on by default; Jackson 2 silently used `0`). The 400 body is Spring Boot's generic one and does not say which field was wrong; validation (§5.3) gives proper messages for required fields.
+
+Spring Boot 4 uses **Jackson 3**, whose packages moved from `com.fasterxml.jackson` to `tools.jackson` (the annotations such as `@JsonProperty` stay in `com.fasterxml.jackson.annotation`). Spring Boot 3 used Jackson 2, so older examples import the old packages. Watch the imports: springdoc still brings Jackson 2 onto the classpath, so an IDE may offer `com.fasterxml.jackson.databind.ObjectMapper` (Jackson 2) where you want `tools.jackson.databind` (Jackson 3, the one Spring Boot configures).
+
+#### Two kinds of test
+
+- **Service unit tests** (`AuthorServiceTest`, `BookServiceTest`) build the service with `new`, passing a real in-memory repository. No Spring context at all, so they run in milliseconds.
+- **Controller slice tests** (`AuthorControllerTest`, `BookControllerTest`) use `@WebMvcTest(XController.class)` with `@MockitoBean XService`: the real MVC stack (routing, JSON, status codes) and a Mockito mock behind it. `@MockitoBean` (Spring Framework 6.2+) replaces Spring Boot's `@MockBean`, which Boot 4 removed.
+
+```java
+given(service.findById(1L)).willReturn(DUNE);             // stub the mock
+
+assertThat(mvc.get().uri("/api/books/1"))
+        .hasStatusOk()
+        .bodyJson()
+        .isStrictlyEqualTo("""
+                {"id": 1, "isbn": "9780441013593", "title": "Dune", ... }
+                """);
+verify(service).delete(1L);                                // check the call was made
+```
+
+In MockMvc the host is `localhost` with no port, so `Location` reads `http://localhost/api/books/1`.
+
+#### OpenAPI and Swagger UI
+
+`springdoc-openapi-starter-webmvc-ui` reads the controllers and DTO records (on the first request to `/v3/api-docs`, not at startup) and publishes:
+- `/v3/api-docs`: the OpenAPI 3 document (JSON), for client generators and tools;
+- `/swagger-ui.html`: redirects to Swagger UI, a page that lists every endpoint and lets you send requests.
+
+springdoc is not managed by the Spring Boot BOM, so its version (`springdoc.version`, the 3.x line for Boot 4) is pinned in the root POM. `OpenApiConfig` only adds the title (from `library.name`) and the version; everything else is generated. The operation ids come from the method names, so two controllers with a `get` method produce `get` and `get_1`. That is harmless in Swagger UI, but client generators turn it into awkward names; `@Operation(operationId = "getBook")` fixes it when that matters.
+
+#### `.http` files
+
+`spring-app/http/*.http` hold ready-made requests for the VS Code **REST Client** extension: open the file and click *Send Request* above a request. `@host = http://localhost:8080` defines a variable used as `{{host}}`. Each request's comment states the expected status. IntelliJ's HTTP client reads the same format.
+
+**Gotchas**
+- `@PathVariable` / `@RequestParam` rely on parameter names compiled into the class (`-parameters`, set by `spring-boot-starter-parent`). Without it you must write `@PathVariable("id")`.
+- Forgetting `@RequestBody` does not fail to compile. Spring then treats the parameter as a `@ModelAttribute` bound from query or form parameters, and the JSON body is ignored.
+- A misspelled JSON field is dropped silently (unknown properties are ignored). The record then gets `null` for a wrapper type, or the request fails with a 400 for a primitive.
+- The in-memory storage is emptied on every restart. That changes in §5.4.
+- The in-memory store is not fully thread-safe. Only the map is concurrent: the service changes stored objects in place, and delete is a check-then-act. Concurrent writes to the same author can interleave (§4.3). §5.6 deals with concurrent writers properly.
 
 ### 5.3 Validation & errors
 
@@ -883,6 +1001,17 @@ A map for orientation, not a claim that the pieces are identical. It grows with 
 | `IHostedService`, `IHostApplicationLifetime.ApplicationStarted` | `ApplicationRunner`, `@EventListener(ApplicationReadyEvent.class)` | A hosted service starts before the server listens; an `ApplicationRunner` runs after Tomcat has started |
 | `IDisposable` on a service | `@PreDestroy` | |
 | `WebApplicationFactory<T>` | `@SpringBootTest` (whole app) or slices such as `@WebMvcTest` | Slices have no direct .NET equivalent |
+| `[ApiController]` + `ControllerBase` | `@RestController` | |
+| `[Route("api/books")]`, `[HttpGet("{id}")]` | `@RequestMapping("/api/books")`, `@GetMapping("/{id}")` | |
+| `[FromRoute]` / `[FromQuery]` / `[FromBody]` | `@PathVariable` / `@RequestParam` / `@RequestBody` | Spring does not infer the body: `@RequestBody` is required |
+| Model binding | Argument resolvers + `HttpMessageConverter`s | |
+| `IActionResult` / `ActionResult<T>` | `ResponseEntity<T>` | Or return the object for a 200 |
+| `CreatedAtAction(...)` | `ResponseEntity.created(location).body(...)` | Build the URI with `ServletUriComponentsBuilder` |
+| `NoContent()` / `NotFound()` | `@ResponseStatus(NO_CONTENT)` / an exception mapped to 404 | |
+| `System.Text.Json` | Jackson (3 in Boot 4) | Both ignore unknown JSON properties by default |
+| Swashbuckle / `Microsoft.AspNetCore.OpenApi` | springdoc-openapi | `/v3/api-docs` + `/swagger-ui.html` |
+| Moq `Setup(...).Returns(...)` / `Verify(...)` | Mockito `given(...).willReturn(...)` / `verify(...)` | `@MockitoBean` puts the mock in the Spring context |
+| `.http` files in Visual Studio / Rider | `.http` files with VS Code REST Client or IntelliJ | Nearly the same syntax |
 
 **LINQ ↔ Streams**
 
@@ -919,3 +1048,6 @@ A map for orientation, not a claim that the pieces are identical. It grows with 
 - **Beans are singletons by default.** A field in a `@Service` is shared by every request thread. In .NET you pick a lifetime on every registration; in Spring a missing choice means "one instance for everyone".
 - **Two beans of one type fail the startup.** .NET quietly injects the last registration. Spring stops with `NoUniqueBeanDefinitionException` until you add `@Primary` or `@Qualifier`.
 - **Unknown configuration keys are silently ignored.** A typo in `application.yml` does not fail anything; the default applies.
+- **`@RequestBody` is not inferred.** `[ApiController]` binds a complex parameter from the body by itself. In Spring, leave out `@RequestBody` and the JSON is silently ignored.
+- **An unhandled exception is a 500 with a generic body.** There is no developer exception page. Map your exceptions to statuses yourself (§5.3).
+- **A missing `int` in the JSON is a 400.** System.Text.Json leaves a missing value-type property at its default (`0`). Jackson 3 rejects a missing or `null` primitive. Use `Integer` for optional numbers.

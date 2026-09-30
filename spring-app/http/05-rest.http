@@ -1,0 +1,41 @@
+### Guide §5.2 REST API. VS Code REST Client syntax: click "Send Request" above each request.
+### The app must be running on :8080. Storage is in memory, so a restart empties it and the ids
+### below (1) assume a freshly started app.
+
+@host = http://localhost:8080
+
+### Create an author (201, Location: http://localhost:8080/api/authors/1)
+POST {{host}}/api/authors
+Content-Type: application/json
+
+{"name": "Frank Herbert", "birthYear": 1920}
+
+### Create a book (201, Location: http://localhost:8080/api/books/1). authorIds is ignored until §5.5.
+POST {{host}}/api/books
+Content-Type: application/json
+
+{"isbn": "9780441013593", "title": "Dune", "publishedYear": 1965, "totalCopies": 3, "authorIds": [1]}
+
+### List books (200)
+GET {{host}}/api/books
+
+### Get one book (200)
+GET {{host}}/api/books/1
+
+### Replace the book's fields (200)
+PUT {{host}}/api/books/1
+Content-Type: application/json
+
+{"isbn": "9780441013593", "title": "Dune", "publishedYear": 1965, "totalCopies": 5, "authorIds": []}
+
+### Delete it (204)
+DELETE {{host}}/api/books/1
+
+### Get the deleted book (404)
+GET {{host}}/api/books/1
+
+### List authors (200)
+GET {{host}}/api/authors
+
+### The OpenAPI document (200); Swagger UI is at {{host}}/swagger-ui.html in a browser
+GET {{host}}/v3/api-docs
