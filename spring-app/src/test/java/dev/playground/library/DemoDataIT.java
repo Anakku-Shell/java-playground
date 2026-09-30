@@ -15,6 +15,7 @@ import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.context.annotation.Import;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.data.domain.Sort;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
 import org.springframework.test.context.ActiveProfiles;
 import org.testcontainers.postgresql.PostgreSQLContainer;
@@ -38,6 +39,13 @@ class DemoDataIT {
     private DataSource dataSource;
 
     @Autowired
+    private JdbcTemplate jdbc;
+
+    private long rows(String table) {
+        return jdbc.queryForObject("select count(*) from " + table, Long.class);
+    }
+
+    @Autowired
     private PostgreSQLContainer postgres;
 
     @Test
@@ -47,6 +55,15 @@ class DemoDataIT {
                 .extracting(Author::getName)
                 .containsExactly("Frank Herbert", "Ursula K. Le Guin", "Jane Austen", "Carl Sagan", "Mary Beard");
         assertThat(books.count()).isEqualTo(10);
+        assertThat(rows("book_authors")).isEqualTo(10);
+        assertThat(rows("members")).isEqualTo(3);
+        assertThat(rows("loans")).isEqualTo(4);
+        // One copy of The Dispossessed, on loan: the .http file borrows it for a 409.
+        assertThat(jdbc.queryForObject(
+                        "select count(*) from loans l join books b on b.id = l.book_id"
+                                + " where b.isbn = '9780061054884' and l.returned_at is null",
+                        Long.class))
+                .isEqualTo(1);
     }
 
     @Test
@@ -73,5 +90,8 @@ class DemoDataIT {
 
         assertThat(authors.count()).isEqualTo(5);
         assertThat(books.count()).isEqualTo(10);
+        assertThat(rows("book_authors")).isEqualTo(10);
+        assertThat(rows("members")).isEqualTo(3);
+        assertThat(rows("loans")).isEqualTo(4);
     }
 }

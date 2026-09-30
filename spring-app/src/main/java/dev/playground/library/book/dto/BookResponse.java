@@ -3,9 +3,8 @@ package dev.playground.library.book.dto;
 import java.util.List;
 
 /**
- * What the API returns for a book. {@code availableCopies} and {@code authors} are computed, not
- * stored: until loans and the book–author relation exist (§5.5) they are {@code totalCopies} and
- * an empty list. Guide: §5.2 REST API.
+ * What the API returns for a book. {@code availableCopies} is computed, not stored: total copies
+ * minus active loans. {@code authors} is sorted by name. Guide: §5.2 REST API, §5.5 Advanced JPA.
  */
 public record BookResponse(
         Long id,

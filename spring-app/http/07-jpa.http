@@ -7,10 +7,10 @@
 
 @host = http://localhost:8080
 
-### The demo books, ordered by id (200, 10 books). SQL: select ... from books order by id
+### The demo books (200, 10 books). Since §5.5 the list is a page sorted by title (08-relations.http)
 GET {{host}}/api/books
 
-### Title filter, any case (200: Dune, Dune Messiah). SQL: ... where upper(title) like upper(?) escape ...
+### Title filter, any case (200: Dune, Dune Messiah). SQL: ... where upper(b1_0.title) like ? escape ...
 GET {{host}}/api/books?title=DUNE
 
 ### A new book (201). SQL: the exists check (select b1_0.id from books b1_0 where b1_0.isbn=?

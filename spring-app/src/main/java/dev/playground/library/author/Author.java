@@ -1,11 +1,17 @@
 package dev.playground.library.author;
 
+import dev.playground.library.book.Book;
+import dev.playground.library.common.AuditedEntity;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
+import jakarta.persistence.ManyToMany;
 import jakarta.persistence.Table;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.Set;
 
 /**
  * A JPA entity mapped to the {@code authors} table. What JPA asks of an entity class:
@@ -20,7 +26,7 @@ import jakarta.persistence.Table;
  */
 @Entity
 @Table(name = "authors")
-public class Author {
+public class Author extends AuditedEntity {
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
@@ -30,6 +36,12 @@ public class Author {
     private String name;
 
     private Integer birthYear;
+
+    // The inverse side: mappedBy names the field on Book that owns the relation. Hibernate reads
+    // these rows from book_authors but never writes them from here, so the getter is read-only.
+    // Nothing in the API needs it; it is here to show the two sides (§5.5).
+    @ManyToMany(mappedBy = "authors")
+    private Set<Book> books = new HashSet<>();
 
     protected Author() {}
 
@@ -56,6 +68,10 @@ public class Author {
 
     public void setBirthYear(Integer birthYear) {
         this.birthYear = birthYear;
+    }
+
+    public Set<Book> getBooks() {
+        return Collections.unmodifiableSet(books);
     }
 
     /**

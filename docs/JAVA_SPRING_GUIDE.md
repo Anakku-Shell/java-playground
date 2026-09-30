@@ -237,7 +237,8 @@ Spring Boot inverts this: **your app owns `main()` and starts an embedded Tomcat
 
 `LibraryApplication` starts and Tomcat listens on port 8080. It serves:
 - `/api/info` (§5.1);
-- CRUD for `/api/authors` and `/api/books` (§5.2), stored in PostgreSQL through Spring Data JPA (§5.4);
+- CRUD for `/api/authors` and `/api/books` (§5.2), stored in PostgreSQL through Spring Data JPA (§5.4), with paged lists (§5.5);
+- members and loans: `/api/members`, `/api/loans` (§5.5);
 - Swagger UI at `/swagger-ui.html`.
 
 Request bodies are validated, and every error is an RFC 9457 `ProblemDetail` (§5.3). On `spring-boot:run`, Spring Boot starts PostgreSQL in Docker and Flyway creates the schema before Tomcat opens the port. `LibraryApplicationIT` (`@SpringBootTest` on a throwaway PostgreSQL) boots the same context in a test, so a broken configuration fails the build.
@@ -1290,7 +1291,196 @@ spring:
 
 ### 5.5 Advanced JPA
 
-_Written in Phase 08._
+**What it is.** The library gets its relations and its rules:
+- Books and authors become **many-to-many** through a join table.
+- **Members** and **loans** are new. A loan points to one book and one member.
+- Lists are **paged**, and filters are composed at runtime with **Specifications**.
+- Timestamps are filled by **auditing**.
+
+Most of the section is about the question §5.4 started: *how many SQL statements does this code send, and when?*
+
+Where the code is:
+- [`V2__book_authors_members_loans.sql`](../spring-app/src/main/resources/db/migration/V2__book_authors_members_loans.sql).
+- `Book.authors` / `Author.books`, `BookRepository`, `BookSpecifications`, `BookTitleOnly`.
+- The new [`member/`](../spring-app/src/main/java/dev/playground/library/member/) and [`loan/`](../spring-app/src/main/java/dev/playground/library/loan/) features.
+- `common/AuditedEntity`, `common/PageResponse`, `common/Paging`, `config/ClockConfig`, `config/JpaAuditingConfig`.
+- Tests: `BookQueriesIT` and `LoanRepositoryIT` (they count statements), `AuditingIT`, `LoanServiceTest`, and `LoanControllerIT`, `MemberControllerIT` and the other `*ControllerIT`s.
+
+Requests: [`http/08-relations.http`](../spring-app/http/08-relations.http).
+
+**Why it matters.** Relations are where JPA code gets slow (N+1) or breaks at runtime (`LazyInitializationException`). Knowing which side of a relation writes, what loads lazily, and how to fetch a list in a fixed number of queries is most of day-to-day JPA.
+
+#### The schema
+
+```
+authors ──< book_authors >── books ──< loans >── members
+             (book_id, author_id)        book_id, member_id, loaned_at,
+                                         due_date, returned_at (NULL = active)
+```
+
+- `book_authors` has no entity: it is the join table of `Book.authors`. Deleting a book deletes its links (`ON DELETE CASCADE`). Deleting an author who still has books is refused by the foreign key, and before that by the service (409).
+- `loans` has no `ON DELETE`: a book or member with loans cannot be deleted. `BookService.delete` checks it first, for a clear 409.
+- Two indexes serve the queries that run most: `book_authors(author_id)` for "books of an author", and a **partial index** `loans(book_id) WHERE returned_at IS NULL` for the availability count.
+
+#### Mapping relations — owning and inverse side
+
+```java
+// Book: the owning side. Hibernate writes book_authors from this set.
+@ManyToMany
+@JoinTable(name = "book_authors",
+        joinColumns = @JoinColumn(name = "book_id"),
+        inverseJoinColumns = @JoinColumn(name = "author_id"))
+@BatchSize(size = 100)
+private Set<Author> authors = new HashSet<>();
+
+// Author: the inverse side. mappedBy names the owning field; nothing here is ever written.
+@ManyToMany(mappedBy = "authors")
+private Set<Book> books = new HashSet<>();
+
+// Loan: many loans per book. The foreign key column is on this table, so this side owns it.
+@ManyToOne(fetch = FetchType.LAZY, optional = false)
+@JoinColumn(name = "book_id")
+private Book book;
+```
+
+- **One relation, one owner.** A bidirectional relation is one set of rows mapped twice. Hibernate writes only from the owning side, the one without `mappedBy`. Add a book to `author.getBooks()` and nothing reaches the database. That is why `Author.getBooks()` returns an unmodifiable view, and links change through `Book.replaceAuthors`. `BookQueriesIT.linksAreWrittenThroughTheOwningSide` shows the write, and `theInverseSideReadsTheSameJoinTable` shows the inverse side reading the same rows.
+- **`@ManyToOne`** owns the foreign key column. A `@OneToMany(mappedBy = "book")` on `Book` would be its inverse. It is left out on purpose: nothing needs "all loans of a book" as a collection, and counting them is a query.
+- **`Set`, not `List`**, for `@ManyToMany`. A `List` without an order column is a "bag": removing one author makes Hibernate delete every link row of the book and insert the rest again. A `Set` gets one DELETE or INSERT per change. `replaceAuthors` uses `retainAll` + `addAll` rather than `clear` + `addAll`, so the links that stay are never touched.
+- **Cascade and `orphanRemoval`: none here.** `cascade = CascadeType.PERSIST/MERGE/REMOVE` repeats an operation on the related entities. `orphanRemoval = true` deletes a child that leaves its parent's collection. Both fit children that belong to one parent, such as order lines. They do not fit shared entities: `REMOVE` on `Book.authors` would delete an author who wrote other books too. Authors, books and members have their own lifecycles, so each is saved on its own.
+
+#### LAZY and EAGER
+
+| Annotation | Default fetch |
+|---|---|
+| `@ManyToOne`, `@OneToOne` | **EAGER** |
+| `@OneToMany`, `@ManyToMany` | LAZY |
+
+EAGER means "always load it, whether this query needs it or not". The to-one default dates from JPA 1.0 and is widely regretted: every loan loaded would load its book and member too, often with one extra query each. **Mark every `@ManyToOne` `LAZY`** and fetch explicitly where a use case needs the data.
+
+- **Lazy means a placeholder.** A lazy to-one is a **proxy**, a generated subclass of `Book` holding only the id. A lazy collection is a `PersistentSet`. The first real use runs the query, and that needs an open persistence context.
+- **`getId()` on a proxy is free.** The proxy was built from `loans.member_id`, so `loan.getMember().getId()` sends nothing (`LoanRepositoryIT.theMemberIdOfALazyProxyNeedsNoQuery`). Any other method loads the row, and so does `hashCode()`. The constant `hashCode` of §5.4 is therefore not free on a proxy: putting one in a `HashSet` runs a SELECT.
+- **`LazyInitializationException`.** Touch a lazy relation after the transaction has ended (a detached entity), and Hibernate cannot load it: *"Cannot lazily initialize collection of role … (no session)"* in Hibernate 7 (older versions say "failed to lazily initialize a collection") (`BookQueriesIT.aLazyCollectionCannotLoadOnceTheBookIsDetached`). With `open-in-view: false` (§5.4) the persistence context closes when the service method returns. So the mapping to DTOs happens **inside** the service, in a transaction: `@Transactional(readOnly = true)` on `BookService.findAll/findById` and `LoanService.findAll/findById`. With open-in-view on, the same code "works", and the controller or Jackson fires the queries without you noticing.
+
+#### N+1, and three fixes
+
+List 20 books and map each one's authors, and a lazy collection costs one query per book: 1 query for the list, plus N for the authors. That is the **N+1 problem**. It is invisible in a unit test and slow in production. The tests turn Hibernate's `Statistics` on (`hibernate.generate_statistics`, in the test only) and count the statements:
+
+| Code | Statements (4 books) | Test |
+|---|---|---|
+| `findAll()`, then touch each book's authors, no fix | 5 = 1 + 4 | the RED run of `touchingEveryBooksAuthorsIsOneBatchNotOneQueryPerBook` |
+| Same, with `@BatchSize(size = 100)` on `Book.authors` | 2 | `touchingEveryBooksAuthorsIsOneBatchNotOneQueryPerBook` |
+| `BookService.findAll` (a page of books, as `GET /api/books` returns it), no fix | 6 = 1 + 4 + 1 | the RED run of `listingAPageOfBooksTakesThreeStatements` |
+| Same, with `@BatchSize` | **3**, for any page size | `listingAPageOfBooksTakesThreeStatements` |
+| `findById`, then touch the authors | 2 | `anEntityGraphFetchesTheAuthorsInTheSameStatement` |
+| `findWithAuthorsById` (`@EntityGraph`) | 1 | same test |
+| Loans with their books: inherited `findAll()` | 4 = 1 + 3 distinct books | `LoanRepositoryIT.withoutAnEntityGraphEachLoansBookIsAnotherQuery` |
+| Loans with `@EntityGraph(attributePaths = "book")` | 1 | `theEntityGraphFetchesTheBooksInTheSameQuery` |
+
+The three fixes:
+1. **A fetch join in JPQL**: `select b from Book b left join fetch b.authors where ...`. One query; you write it by hand.
+2. **`@EntityGraph(attributePaths = "authors")`** on a repository method does the same for a derived or inherited query. It is used on `findWithAuthorsById` and on the loans list (`LoanRepository` overrides `findAll(Specification, Sort)` only to add it).
+3. **Batch fetching**: `@BatchSize` on the relation, or `hibernate.default_batch_fetch_size` for all of them. The code stays naive; when the first collection is touched, Hibernate loads the collections of up to *size* books from the persistence context in one statement (`... where book_id = any (?)` on PostgreSQL).
+
+The page of books uses batch fetching. Its three statements, from the SQL log: the page (`... order by title, id offset ? rows fetch first ? rows only`), the active loans grouped by book, then the authors of all the books on the page.
+
+**Collection fetch + paging.** Older advice says never to fetch-join a collection on a paged query. Older Hibernate versions could not put `LIMIT` on rows that a join had multiplied: they loaded everything and paged in memory, with only a warning (`HHH000104` in Hibernate 5, `HHH90003004` in 6). Hibernate 7.4, the version here, did it in SQL for both an `@EntityGraph` and a JPQL `join fetch` on a paged query (checked while writing this phase): the log shows the page as a subquery on `books`, with the authors joined outside it. So `@EntityGraph` on the paged query would work too (2 statements instead of 3). Batch fetching was kept because it covers every path that touches `authors` (create, update, the single book) without a per-query annotation, and does not depend on how a Hibernate version pages. On an older Hibernate, check the SQL before trusting a fetch join on a page. `hibernate.query.fail_on_pagination_over_collection_fetch=true` turns the in-memory fallback into an error.
+
+`availableCopies` is the other half of N+1. A count query per book would be N+1 again, so the page gets one grouped query:
+
+```java
+@Query("""
+        select new dev.playground.library.loan.ActiveLoanCount(l.book.id, count(l))
+        from Loan l
+        where l.book.id in :bookIds and l.returnedAt is null
+        group by l.book.id""")
+List<ActiveLoanCount> countActiveByBookIds(Collection<Long> bookIds);
+```
+
+#### Projections
+
+Loading entities for read-only output is often more than needed. A projection selects only the columns you ask for, and the result is not tracked.
+
+| Kind | How | Here |
+|---|---|---|
+| **Interface** | A repository method returns an interface with getters; Spring Data backs them with the row | `BookTitleOnly` (`getId`, `getTitle`) from `findByAuthorsIdOrderByTitle`, for `GET /api/authors/{id}/books`. The SQL selects `id, title` only |
+| **DTO / record** | A JPQL constructor expression `select new pkg.Record(...)` | `ActiveLoanCount`, one row per group |
+| **Entity + mapper** | Load entities, map them to DTOs in the service | Everything else. Needed when you change the entity, handy when you need most of its fields |
+
+#### Paging and sorting
+
+```java
+@GetMapping
+public PageResponse<BookResponse> list(
+        @RequestParam(required = false) String title,
+        @RequestParam(required = false) Long authorId,
+        @SortDefault("title") Pageable pageable) { ... }
+```
+
+- Spring builds the `Pageable` from `?page=` (**zero-based**), `?size=` (default 20) and `?sort=title,desc` (repeatable). `spring.data.web.pageable.max-page-size: 100` **clamps** `?size=500` to 100 rather than rejecting it (`BookControllerTest.aPageSizeAboveTheMaximumIsClamped`).
+- `JpaSpecificationExecutor.findAll(spec, pageable)` returns a `Page`: the content plus the total. The total costs a `select count(*)`. Spring Data skips it when the first page is shorter than the page size, because that page is the whole result. `Slice` is the variant with no count, for "load more" lists.
+- The API returns our own `PageResponse(content, page, size, totalElements, totalPages)`, not the `Page` object. Spring Data warns that `PageImpl`'s JSON is not a stable format. Its own alternative is `@EnableSpringDataWebSupport(pageSerializationMode = VIA_DTO)`.
+- **A stable order across pages.** Sort by title alone, and two books with the same title can come back in either order. Page 1 and page 2 are separate queries, so a book could appear twice or never. `Paging.sanitize` appends `id` to every sort.
+- **Only listed properties can be sorted by.** `?sort=popularity` does not exist: Spring Data would throw `PropertyReferenceException` and the catch-all would answer 500. `?sort=authors.name` is worse: it exists, so Spring Data joins `book_authors`, a book with two authors becomes two rows, and `LIMIT`/`OFFSET` counts rows, not books. The review of this phase found the same book on pages 1 and 3 and a total that changed from page to page, all with a 200. `Paging.sanitize` checks each sort against the endpoint's allow-list (`BookService.SORTABLE`) and answers 400 (`BookControllerIT.sortingThroughARelationIs400`). The `PropertyReferenceException` handler stays as a safety net.
+
+#### Specifications — filters built at runtime
+
+`?title=` and `?authorId=` are both optional, so there are four combinations. Four derived methods would be ugly. A **Specification** is one condition written with the JPA Criteria API; `Specification.allOf(...)` combines them, and a filter that was not given is `Specification.unrestricted()`:
+
+```java
+public static Specification<Book> hasAuthor(Long authorId) {
+    if (authorId == null) return Specification.unrestricted();
+    return (book, query, cb) -> cb.equal(book.join("authors").get("id"), authorId);
+}
+
+Specification<Book> filters = Specification.allOf(titleContains(title), hasAuthor(authorId));
+Page<Book> page = books.findAll(filters, Paging.sanitize(pageable, SORTABLE));
+```
+
+- The repository opts in with `extends JpaSpecificationExecutor<Book>`. It is the closest thing to composing `IQueryable` in LINQ.
+- Property names are strings (`"title"`), checked only when the query runs. The Hibernate annotation processor can generate a typed metamodel (`Book_.title`), which this project does not use.
+- **Escape the `LIKE` wildcards.** A derived `Containing` query escapes `%` and `_` for you. A hand-written `like` does not, and `?title=%` would match every book. `BookSpecifications.titleContains` uses Spring Data's `EscapeCharacter` (`BookQueriesIT.likeWildcardsInTheTitleFilterAreLiteral`).
+- **Fold the case on one side only.** The first version upper-cased the pattern in Java and the column in PostgreSQL. They disagree on some letters: Java turns `ß` into `SS`, PostgreSQL keeps `ß`, so `?title=straße` found nothing. Both sides now go through the database's `upper()` (`theTitleFilterFoldsCaseLikeTheDatabase`).
+
+#### Auditing and the clock
+
+```java
+@MappedSuperclass
+@EntityListeners(AuditingEntityListener.class)
+public abstract class AuditedEntity {
+    @CreatedDate @Column(nullable = false, updatable = false) private Instant createdAt;
+    @LastModifiedDate @Column(nullable = false) private Instant updatedAt;
+}
+```
+
+- `Author` and `Book` extend it. A `@MappedSuperclass` has no table of its own: its fields become columns of each subclass's table. `Member` has only `created_at`, so it registers the listener itself.
+- `@EnableJpaAuditing` turns the listener on. It sits on its own class, `JpaAuditingConfig`, and not on `LibraryApplication`: `@WebMvcTest` reads the main class's annotations, and auditing needs JPA, which that slice does not have. The time comes from our `Clock` bean (`dateTimeProviderRef`), so tests decide what "now" is. `AuditingIT` replaces the clock with `@MockitoBean`.
+- **Everything that needs "now" takes the `Clock`.** `LoanService` computes `dueDate = LocalDate.now(clock).plusDays(14)`, and `LoanServiceTest` passes `Clock.fixed(...)` to assert an exact date. The same idea as injecting `TimeProvider` in .NET 8.
+
+#### The loan rules — `LoanService`, `LoanServiceTest`, `LoanControllerIT`
+
+| Rule | Answer |
+|---|---|
+| Unknown book, member or loan | 404 |
+| No copy left (`active loans >= totalCopies`) | 409 `Book 4 has no available copies` |
+| The member already holds `library.loans.max-active` (3) | 409 |
+| Returning a returned loan | 409, and `returnedAt` keeps its first value (**`returningTwiceIsRejected`**) |
+| `PUT` a book with `totalCopies` below its active loans | 409 |
+| Delete a book with loans, or an author with books | 409 |
+| Unknown id in a book's `authorIds` | 404 `Author 999 not found` |
+
+- `availableCopies` is not stored. It is `totalCopies` minus the active loans, counted on every read, so it can never drift.
+- Returning is `POST /api/loans/{id}/return`: an action on the loan, not a `PUT` of the whole resource.
+- **Two borrows of the last copy at the same moment both succeed.** Both pass the count before either inserts. §5.6 closes that race with optimistic locking.
+- **Two returns of the same loan at the same moment both answer 200**, and the second overwrites `returnedAt`, for the same reason. §5.6 covers both.
+
+**Gotchas**
+- **`@PageableDefault(sort = "title")` also sets the page size**, to its own default of 10, not the global 20. `@SortDefault("title")` sets only the sort. A RED test caught this.
+- **`@DataJpaTest` does not load your `@Configuration` classes.** Without `@Import(JpaAuditingConfig.class)`, `created_at` is inserted as `null` and the NOT NULL constraint fails. `BookRepositoryIT` hit exactly that.
+- **Timestamps lose precision in the database.** Java's clock ticks below a microsecond on this machine, and `timestamptz` keeps microseconds. `POST /api/loans` answered `…896334700Z` while a later `GET` read `…896335Z`, the value rounded by PostgreSQL. `LoanService` truncates its "now" to microseconds.
+- **Changing only a collection does not move `updatedAt`.** A `PUT` that changes only `authorIds` rewrites `book_authors` but sends no `UPDATE` of the `books` row, so `@PreUpdate`, and with it `@LastModifiedDate`, never runs.
+- **`mappedBy` side edits are silently ignored**, and so are edits to a detached entity's collection. There is no error; nothing is written.
+- **`toString`, `equals` or JSON serialisation walking a relation** loads it, or recurses forever through a bidirectional pair. Keep those methods on plain fields, and never serialise entities.
+- **Spring Data 4 moved some types.** `PropertyReferenceException` and `TypeInformation` now live in `org.springframework.data.core` (they were in `org.springframework.data.mapping`/`util`). `Specification.unrestricted()` is the "no condition" specification; older code passed `null` around instead.
 
 ### 5.6 Transactions
 
@@ -1418,7 +1608,16 @@ A map for orientation, not a claim that the pieces are identical. It grows with 
 | LINQ to Entities (`Where`, `OrderBy`…) | Derived queries (`findByTitleContainingIgnoreCase`), JPQL `@Query`, Specifications | No compiler-checked query language; derived names and JPQL are checked at startup |
 | `FromSqlRaw` / `FromSql` | `@Query(nativeQuery = true)` | |
 | Change tracking + `SaveChanges()` | Dirty checking + flush on commit | No explicit save call: the end of the `@Transactional` method writes the changes |
-| `AsNoTracking()` | Detached entities, read-only transactions, projections (§5.5, §5.6) | |
+| `AsNoTracking()` | Projections (§5.5), read-only transactions (§5.6) | A projection is never tracked; `readOnly` skips dirty checking |
+| `Include()` / `ThenInclude()` | `@EntityGraph(attributePaths = ...)` / JPQL `join fetch` | |
+| `AsSplitQuery()` | Batch fetching (`@BatchSize`, `default_batch_fetch_size`) | Not the same mechanism, same goal: no cartesian join, no N+1 |
+| Lazy-loading proxies (`UseLazyLoadingProxies`, opt-in) | LAZY relations and Hibernate proxies (default for collections) | Without proxies EF leaves an unloaded navigation null; Hibernate loads it on first use, or throws once the transaction is over |
+| `HasMany(...).WithMany(...)` (skip navigations) | `@ManyToMany` + `@JoinTable` on the owning side, `mappedBy` on the other | EF fixes up both navigations; JPA writes only the owning side |
+| `Select(b => new BookDto(...))` | Interface projection / `select new ...Record(...)` | |
+| Composing `IQueryable` (`if (x) q = q.Where(...)`) | `Specification.allOf(...)` + `JpaSpecificationExecutor` | |
+| `Skip` / `Take` + `CountAsync` | `Pageable` → `Page` (content + total) | Page numbers are zero-based |
+| Setting `CreatedAt` in `SaveChanges` / an interceptor | `@CreatedDate` / `@LastModifiedDate` + `AuditingEntityListener` | |
+| `TimeProvider` (.NET 8) | `java.time.Clock` | Inject it; tests pass `Clock.fixed(...)` |
 | EF Migrations (code first, generated from the model) | Flyway (hand-written SQL files) | `__EFMigrationsHistory` ↔ `flyway_schema_history` |
 | `Database.EnsureCreated()` | `spring.jpa.hibernate.ddl-auto: create` | Prototypes only in both. Not the same: `create` drops and recreates the schema on every start, losing the data, while `EnsureCreated` leaves an existing database alone |
 | `Scaffold-DbContext` (database first) | Hibernate Tools / IDE reverse engineering | |
@@ -1469,4 +1668,8 @@ A map for orientation, not a claim that the pieces are identical. It grows with 
 - **There is no `SaveChanges()`.** Changes to a managed entity are written when the transaction commits. Without `@Transactional` on the service method there is no transaction to commit, and the change is lost without an error (§5.4).
 - **Hibernate may write before you expect.** Before a query, it flushes pending changes to the tables that query reads (auto flush). EF only writes on `SaveChanges()`. Run your checks before you change the entity (§5.4).
 - **Entity `equals`/`hashCode`.** EF tracks entities by reference and rarely cares. JPA code relies on them wherever entities sit in sets and collections (the relations of §5.5), and field-based ones (Lombok's `@Data`, a record) break. Compare by id, and return a constant hash code (§5.4).
+- **`@ManyToOne` loads eagerly by default.** EF loads nothing you did not `Include`. JPA loads every to-one relation unless you write `fetch = FetchType.LAZY` (§5.5).
+- **Only one side of a relation is written.** EF fixes up both navigation properties. In JPA, adding to the `mappedBy` side does nothing, without an error (§5.5).
+- **A lazy relation outside the transaction throws.** `LazyInitializationException` means the data was needed after the service returned. Fetch it in the query or map inside the transaction; do not turn open-in-view back on (§5.5).
+- **Pages start at 0.** `?page=1` is the second page.
 - **The schema is not generated from the classes.** Flyway runs your SQL; Hibernate only validates. Adding a field to an entity means writing a migration too, or the app does not start.

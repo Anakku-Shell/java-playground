@@ -1,12 +1,16 @@
 package dev.playground.library.author;
 
+import dev.playground.library.author.dto.AuthorBookResponse;
 import dev.playground.library.author.dto.AuthorResponse;
 import dev.playground.library.author.dto.CreateAuthorRequest;
 import dev.playground.library.author.dto.UpdateAuthorRequest;
+import dev.playground.library.common.PageResponse;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Positive;
 import java.net.URI;
 import java.util.List;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.web.SortDefault;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -36,14 +40,21 @@ public class AuthorController {
         this.service = service;
     }
 
+    /** One page of authors, by name unless {@code ?sort=} says otherwise (see {@code BookController}). */
     @GetMapping
-    public List<AuthorResponse> list() {
-        return service.findAll();
+    public PageResponse<AuthorResponse> list(@SortDefault("name") Pageable pageable) {
+        return service.findAll(pageable);
     }
 
     @GetMapping("/{id}")
     public AuthorResponse get(@PathVariable @Positive Long id) {
         return service.findById(id);
+    }
+
+    /** A sub-resource: the books of one author, by title. */
+    @GetMapping("/{id}/books")
+    public List<AuthorBookResponse> books(@PathVariable @Positive Long id) {
+        return service.findBooks(id);
     }
 
     /** 201 Created with a Location header pointing at the new resource. */

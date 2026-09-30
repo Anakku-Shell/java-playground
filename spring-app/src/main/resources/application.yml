@@ -20,6 +20,11 @@ spring:
     # "works" in controllers while firing hidden queries there. Off, and data is loaded in the
     # service layer on purpose (§5.5 shows the LazyInitializationException this exposes).
     open-in-view: false
+  data:
+    web:
+      pageable:
+        # ?size=500 is clamped to 100 (not an error): one request cannot ask for the whole table.
+        max-page-size: 100
   flyway:
     # After a dev run, flyway_schema_history lists R__demo_data, which other profiles cannot see
     # (db/demo is only on the dev path). Flyway would refuse to start ("applied migration not

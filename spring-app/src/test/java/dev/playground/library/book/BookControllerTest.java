@@ -11,12 +11,15 @@ import dev.playground.library.book.dto.CreateBookRequest;
 import dev.playground.library.book.dto.UpdateBookRequest;
 import dev.playground.library.common.ConflictException;
 import dev.playground.library.common.NotFoundException;
+import dev.playground.library.common.PageResponse;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Sort;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
@@ -34,29 +37,79 @@ class BookControllerTest {
     @MockitoBean
     private BookService service;
 
-    @Test
-    void listReturnsAllBooks() {
-        given(service.findAll(null)).willReturn(List.of(DUNE));
+    private static PageResponse<BookResponse> onePage(BookResponse... books) {
+        return new PageResponse<>(List.of(books), 0, 20, books.length, 1);
+    }
 
-        assertThat(mvc.get().uri("/api/books"))
+    @Test
+    void listReturnsTheFirstPageSortedByTitle() {
+        // No paging parameters: page 0, size 20 (Spring Data's default), sort from @SortDefault.
+        given(service.findAll(null, null, PageRequest.of(0, 20, Sort.by("title"))))
+                .willReturn(onePage(DUNE));
+
+        assertThat(mvc.get().uri("/api/books")).hasStatusOk().bodyJson().isStrictlyEqualTo("""
+                {
+                  "content": [{"id": 1, "isbn": "9780441013593", "title": "Dune", "publishedYear": 1965,
+                               "totalCopies": 3, "availableCopies": 3, "authors": []}],
+                  "page": 0, "size": 20, "totalElements": 1, "totalPages": 1
+                }
+                """);
+    }
+
+    @Test
+    void listPassesTheFiltersAndPagingParameters() {
+        // Optional query parameters: absent, they arrive as null.
+        var pageable = PageRequest.of(2, 5, Sort.by(Sort.Direction.DESC, "publishedYear"));
+        given(service.findAll("dune", 7L, pageable)).willReturn(onePage(DUNE));
+
+        assertThat(mvc.get()
+                        .uri("/api/books")
+                        .queryParam("title", "dune")
+                        .queryParam("authorId", "7")
+                        .queryParam("page", "2")
+                        .queryParam("size", "5")
+                        .queryParam("sort", "publishedYear,desc"))
                 .hasStatusOk()
                 .bodyJson()
-                .extractingPath("$[*].title")
+                .extractingPath("$.content[*].title")
                 .asArray()
                 .containsExactly("Dune");
     }
 
     @Test
-    void listFiltersByTitle() {
-        // An optional query parameter: GET /api/books?title=dune. Absent, it arrives as null.
-        given(service.findAll("dune")).willReturn(List.of(DUNE));
+    void aPageSizeAboveTheMaximumIsClamped() {
+        // spring.data.web.pageable.max-page-size: 100. Not an error: the client gets 100 at most.
+        given(service.findAll(null, null, PageRequest.of(0, 100, Sort.by("title"))))
+                .willReturn(onePage(DUNE));
 
-        assertThat(mvc.get().uri("/api/books").queryParam("title", "dune"))
-                .hasStatusOk()
+        assertThat(mvc.get().uri("/api/books").queryParam("size", "500")).hasStatusOk();
+        verify(service).findAll(null, null, PageRequest.of(0, 100, Sort.by("title")));
+    }
+
+    @Test
+    void anAuthorIdFilterMustBePositive() {
+        assertThat(mvc.get().uri("/api/books").queryParam("authorId", "0"))
+                .hasStatus(HttpStatus.BAD_REQUEST)
                 .bodyJson()
-                .extractingPath("$[*].title")
-                .asArray()
-                .containsExactly("Dune");
+                .extractingPath("$.errors")
+                .isEqualTo(Map.of("authorId", List.of("must be greater than 0")));
+        verifyNoInteractions(service);
+    }
+
+    @Test
+    void authorIdsMustBePositive() {
+        // Constraints on the type argument (Set<@NotNull @Positive Long>) check every element.
+        assertThat(mvc.post()
+                        .uri("/api/books")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"isbn": "9780441013593", "title": "Dune", "totalCopies": 3, "authorIds": [0]}
+                                """))
+                .hasStatus(HttpStatus.BAD_REQUEST)
+                .bodyJson()
+                .extractingPath("$.errors")
+                .isEqualTo(Map.of("authorIds[]", List.of("must be greater than 0")));
+        verifyNoInteractions(service);
     }
 
     @Test

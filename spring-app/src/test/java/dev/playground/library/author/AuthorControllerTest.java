@@ -8,15 +8,19 @@ import static org.mockito.BDDMockito.willThrow;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 
+import dev.playground.library.author.dto.AuthorBookResponse;
 import dev.playground.library.author.dto.AuthorResponse;
 import dev.playground.library.author.dto.CreateAuthorRequest;
 import dev.playground.library.author.dto.UpdateAuthorRequest;
 import dev.playground.library.common.NotFoundException;
+import dev.playground.library.common.PageResponse;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Sort;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
@@ -39,16 +43,38 @@ class AuthorControllerTest {
     private AuthorService service;
 
     @Test
-    void listReturnsAllAuthors() {
-        given(service.findAll())
-                .willReturn(List.of(
-                        new AuthorResponse(1L, "Jane Austen", 1775), new AuthorResponse(2L, "Frank Herbert", 1920)));
+    void listReturnsAPageSortedByName() {
+        given(service.findAll(PageRequest.of(0, 20, Sort.by("name"))))
+                .willReturn(new PageResponse<>(
+                        List.of(
+                                new AuthorResponse(2L, "Frank Herbert", 1920),
+                                new AuthorResponse(1L, "Jane Austen", 1775)),
+                        0,
+                        20,
+                        2,
+                        1));
 
         assertThat(mvc.get().uri("/api/authors")).hasStatusOk().bodyJson().isStrictlyEqualTo("""
-                        [
-                          {"id": 1, "name": "Jane Austen", "birthYear": 1775},
-                          {"id": 2, "name": "Frank Herbert", "birthYear": 1920}
-                        ]
+                        {
+                          "content": [
+                            {"id": 2, "name": "Frank Herbert", "birthYear": 1920},
+                            {"id": 1, "name": "Jane Austen", "birthYear": 1775}
+                          ],
+                          "page": 0, "size": 20, "totalElements": 2, "totalPages": 1
+                        }
+                        """);
+    }
+
+    @Test
+    void booksOfAnAuthor() {
+        given(service.findBooks(1L))
+                .willReturn(List.of(new AuthorBookResponse(3L, "Dune"), new AuthorBookResponse(4L, "Dune Messiah")));
+
+        assertThat(mvc.get().uri("/api/authors/1/books"))
+                .hasStatusOk()
+                .bodyJson()
+                .isStrictlyEqualTo("""
+                        [{"id": 3, "title": "Dune"}, {"id": 4, "title": "Dune Messiah"}]
                         """);
     }
 

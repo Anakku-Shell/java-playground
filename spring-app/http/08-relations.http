@@ -1,0 +1,109 @@
+### Guide §5.5 Advanced JPA. VS Code REST Client syntax: click "Send Request" above each request.
+### Start the app with the dev profile (demo authors, books, members and loans):
+###   ./mvnw -pl spring-app spring-boot:run -Dspring-boot.run.profiles=dev
+### The console shows every SQL statement. Ids and statuses assume the demo data on an empty
+### database, and a first run of this file: reset with docker compose -f spring-app/compose.yaml down -v
+### "# @name x" names a request, so later ones can use {{x.response.body.id}}.
+
+@host = http://localhost:8080
+
+### A page of books, sorted by title (200, 10 books). Three SQL statements, whatever the page size:
+### the page, the active loans grouped by book, then the authors of all its books (... where book_id = any (?))
+GET {{host}}/api/books
+
+### Page 1 (zero-based) of 3, newest first (200). With more rows than one page, Spring Data also
+### sends a select count(...) for totalElements
+GET {{host}}/api/books?page=1&size=3&sort=publishedYear,desc
+
+### Jane Austen's books (200, 3 books): a join on book_authors
+GET {{host}}/api/books?authorId=3
+
+### A size above 100 is clamped (200, "size": 100)
+GET {{host}}/api/books?size=500
+
+### Not a sortable property (400, "Cannot sort by 'popularity'. Sortable: ...")
+GET {{host}}/api/books?sort=popularity
+
+### A real path, but through a collection: a join would duplicate rows across pages (400)
+GET {{host}}/api/books?sort=authors.name
+
+### Dune (200): 3 copies, 1 on loan to Ada, so availableCopies 2. One SELECT with a left join to
+### the authors (the entity graph), then the loan count
+GET {{host}}/api/books/1
+
+### Authors, sorted by name (200)
+GET {{host}}/api/authors
+
+### Frank Herbert's books (200: Dune, Dune Messiah). An interface projection: select id, title only
+GET {{host}}/api/authors/1/books
+
+### Frank Herbert still has books (409)
+DELETE {{host}}/api/authors/1
+
+### Two new authors (201 each), then one book by both
+# @name pratchett
+POST {{host}}/api/authors
+Content-Type: application/json
+
+{"name": "Terry Pratchett", "birthYear": 1948}
+
+###
+# @name gaiman
+POST {{host}}/api/authors
+Content-Type: application/json
+
+{"name": "Neil Gaiman", "birthYear": 1960}
+
+### Good Omens by both (201; authors sorted by name). SQL: insert into books, then one insert into
+### book_authors per author
+POST {{host}}/api/books
+Content-Type: application/json
+
+{"isbn": "9780060853983", "title": "Good Omens", "publishedYear": 1990, "totalCopies": 2,
+ "authorIds": [{{pratchett.response.body.id}}, {{gaiman.response.body.id}}]}
+
+### An author id that does not exist (404, "Author 999 not found")
+POST {{host}}/api/books
+Content-Type: application/json
+
+{"isbn": "9780547928227", "title": "The Hobbit", "publishedYear": 1937, "totalCopies": 1, "authorIds": [999]}
+
+### A new member (201; the email is stored lowercase)
+POST {{host}}/api/members
+Content-Type: application/json
+
+{"email": "Hedy@Library.test", "fullName": "Hedy Lamarr"}
+
+### The same email in another case (409)
+POST {{host}}/api/members
+Content-Type: application/json
+
+{"email": "hedy@library.TEST", "fullName": "Someone else"}
+
+### The Dispossessed has one copy, and Alan has it (409, "Book 4 has no available copies")
+POST {{host}}/api/loans
+Content-Type: application/json
+
+{"bookId": 4, "memberId": 1}
+
+### Grace borrows Dune (201): due today + 14 days
+# @name loan
+POST {{host}}/api/loans
+Content-Type: application/json
+
+{"bookId": 1, "memberId": 3}
+
+### Grace's active loans (200: Pale Blue Dot, overdue, and Dune). One SELECT joins the books
+GET {{host}}/api/loans?memberId=3&active=true
+
+### Return it (200, returnedAt set)
+POST {{host}}/api/loans/{{loan.response.body.id}}/return
+
+### Return it again (409, "... was already returned")
+POST {{host}}/api/loans/{{loan.response.body.id}}/return
+
+### Dune has loans, so it cannot be deleted (409)
+DELETE {{host}}/api/books/1
+
+### Returned loans (200: Ada's Emma and Grace's Dune)
+GET {{host}}/api/loans?active=false

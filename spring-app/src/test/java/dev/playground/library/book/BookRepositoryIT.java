@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import dev.playground.library.TestcontainersConfiguration;
+import dev.playground.library.config.JpaAuditingConfig;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -16,10 +17,12 @@ import org.springframework.data.domain.Sort;
 /**
  * The repository against a real PostgreSQL. {@code @DataJpaTest} is a slice: JPA, Flyway and the
  * repositories, no web layer and no services. Each test runs in a transaction that is rolled back
- * at the end, so the tests do not see each other's rows. Guide: §5.4 Persistence with JPA.
+ * at the end, so the tests do not see each other's rows. Our {@code @Configuration} classes are not
+ * part of the slice: without the auditing one, {@code created_at} would be inserted as null (§5.5).
+ * Guide: §5.4 Persistence with JPA.
  */
 @DataJpaTest
-@Import(TestcontainersConfiguration.class)
+@Import({TestcontainersConfiguration.class, JpaAuditingConfig.class})
 class BookRepositoryIT {
 
     @Autowired

@@ -3,10 +3,12 @@ package dev.playground.library.book;
 import dev.playground.library.book.dto.BookResponse;
 import dev.playground.library.book.dto.CreateBookRequest;
 import dev.playground.library.book.dto.UpdateBookRequest;
+import dev.playground.library.common.PageResponse;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Positive;
 import java.net.URI;
-import java.util.List;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.web.SortDefault;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -35,10 +37,19 @@ public class BookController {
         this.service = service;
     }
 
-    /** {@code ?title=} is optional: without it every book is listed. */
+    /**
+     * One page of books. Spring builds the {@code Pageable} from {@code ?page=} (zero-based),
+     * {@code ?size=} (default 20, capped at 100 by {@code spring.data.web.pageable.max-page-size})
+     * and {@code ?sort=title,desc} (repeatable); {@code @SortDefault} sorts by title when no sort
+     * is given ({@code @PageableDefault} would also reset the size to its own default, 10).
+     * {@code ?title=} and {@code ?authorId=} are optional filters.
+     */
     @GetMapping
-    public List<BookResponse> list(@RequestParam(required = false) String title) {
-        return service.findAll(title);
+    public PageResponse<BookResponse> list(
+            @RequestParam(required = false) String title,
+            @RequestParam(required = false) @Positive Long authorId,
+            @SortDefault("title") Pageable pageable) {
+        return service.findAll(title, authorId, pageable);
     }
 
     @GetMapping("/{id}")

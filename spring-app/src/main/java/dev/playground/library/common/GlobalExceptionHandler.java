@@ -10,6 +10,7 @@ import java.util.TreeMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.data.core.PropertyReferenceException;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.HttpStatusCode;
@@ -59,6 +60,24 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
     public ProblemDetail handleDataIntegrityViolation(DataIntegrityViolationException ex) {
         log.warn("Constraint violation: {}", ex.getMostSpecificCause().getMessage());
         return ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, "The request conflicts with existing data.");
+    }
+
+    /** {@code ?sort=} outside the endpoint's allow-list ({@code Paging.sanitize}, §5.5). */
+    @ExceptionHandler(InvalidSortException.class)
+    public ProblemDetail handleInvalidSort(InvalidSortException ex) {
+        return ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, ex.getMessage());
+    }
+
+    /**
+     * What Spring Data throws when a sort names a property the entity does not have. The paged
+     * endpoints check their allow-list first, so this is the safety net for a sort that skips it:
+     * the client's mistake, so 400, naming only the requested property (Spring's message also names
+     * the entity class). Guide: §5.5.
+     */
+    @ExceptionHandler(PropertyReferenceException.class)
+    public ProblemDetail handleUnknownSortProperty(PropertyReferenceException ex) {
+        return ProblemDetail.forStatusAndDetail(
+                HttpStatus.BAD_REQUEST, "Cannot sort by '" + ex.getPropertyName() + "': no such property.");
     }
 
     @ExceptionHandler(ExternalServiceException.class)

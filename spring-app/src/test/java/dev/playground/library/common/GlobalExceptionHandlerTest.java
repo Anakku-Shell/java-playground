@@ -15,6 +15,8 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.data.core.PropertyReferenceException;
+import org.springframework.data.core.TypeInformation;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.assertj.MockMvcTester;
@@ -85,6 +87,23 @@ class GlobalExceptionHandlerTest {
                         """);
         // The body says nothing about tables or constraints; the log names them.
         assertThat(output).contains("WARN").contains("books_isbn_key");
+    }
+
+    @Test
+    void unknownSortPropertyIs400() {
+        // A client mistake (?sort=popularity), not a server bug: without a handler, the catch-all
+        // would answer 500.
+        assertThat(mvc.get().uri("/things/sorted"))
+                .hasStatus(HttpStatus.BAD_REQUEST)
+                .bodyJson()
+                .isStrictlyEqualTo("""
+                        {
+                          "title": "Bad Request",
+                          "status": 400,
+                          "detail": "Cannot sort by 'popularity': no such property.",
+                          "instance": "/things/sorted"
+                        }
+                        """);
     }
 
     @Test
@@ -225,6 +244,12 @@ class GlobalExceptionHandlerTest {
             throw new DataIntegrityViolationException(
                     "could not execute statement [ERROR: duplicate key value violates unique constraint"
                             + " \"books_isbn_key\"]");
+        }
+
+        @GetMapping("/things/sorted")
+        void sorted() {
+            // What Spring Data throws when ?sort= names something the entity does not have.
+            throw new PropertyReferenceException("popularity", TypeInformation.of(Object.class), List.of());
         }
 
         @GetMapping("/things/external")
