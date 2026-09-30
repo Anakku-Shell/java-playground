@@ -1,5 +1,6 @@
 package dev.playground.library.loan;
 
+import dev.playground.library.audit.AuditService;
 import dev.playground.library.book.Book;
 import dev.playground.library.book.BookRepository;
 import dev.playground.library.common.ConflictException;
@@ -23,9 +24,12 @@ import org.springframework.transaction.annotation.Transactional;
  * Borrowing and returning. The rules: a copy must be available (total copies minus active loans),
  * a member holds at most {@code library.loans.max-active} loans, a loan is due
  * {@code library.loans.duration-days} after today, and a loan is returned once. Each broken rule is
- * a {@code ConflictException} (409). Guide: §5.5 Advanced JPA.
+ * a {@code ConflictException} (409). Reads run in the class-level read-only transaction; borrow and
+ * return are read-write, and their races are closed with optimistic locking. Guide: §5.5 Advanced
+ * JPA, §5.6 Transactions.
  */
 @Service
+@Transactional(readOnly = true)
 public class LoanService {
 
     private final LoanRepository loans;
@@ -33,28 +37,40 @@ public class LoanService {
     private final MemberRepository members;
     private final LibraryProperties.Loans rules;
     private final Clock clock;
+    private final AuditService audit;
 
     public LoanService(
             LoanRepository loans,
             BookRepository books,
             MemberRepository members,
             LibraryProperties properties,
-            Clock clock) {
+            Clock clock,
+            AuditService audit) {
         this.loans = loans;
         this.books = books;
         this.members = members;
         this.rules = properties.loans();
         this.clock = clock;
+        this.audit = audit;
     }
 
     /**
-     * Two requests for the last copy can both pass the availability check before either inserts:
-     * both succeed. §5.6 closes that race with optimistic locking.
+     * Two borrows can both pass a check before either inserts: the checks read committed data only,
+     * and neither loan is committed yet. Two borrows of the last copy, or two borrows by a member one
+     * loan short of the maximum. So each rule gets a row to collide on: the book (copies) and the
+     * member (max-active) are read with a version bump. At commit, the second of two overlapping
+     * borrows finds a newer version, fails with an optimistic locking exception (409, retry) and its
+     * loan is rolled back. {@code LoanConcurrencyIT} forces these races.
      */
     @Transactional
     public LoanResponse borrow(CreateLoanRequest request) {
-        Book book = books.findById(request.bookId()).orElseThrow(() -> new NotFoundException("Book", request.bookId()));
-        Member member = members.findById(request.memberId())
+        // First, and in a transaction of its own (see AuditService): a rejected borrow is audited too.
+        // The cost: this transaction already holds a connection, and the audit takes a second one.
+        audit.record("BORROW_REQUESTED", "book " + request.bookId() + ", member " + request.memberId());
+        // Both read with a version bump: see the methods, and the races described above.
+        Book book = books.findWithVersionIncrementById(request.bookId())
+                .orElseThrow(() -> new NotFoundException("Book", request.bookId()));
+        Member member = members.findWithVersionIncrementById(request.memberId())
                 .orElseThrow(() -> new NotFoundException("Member", request.memberId()));
 
         if (loans.countByMemberIdAndReturnedAtIsNull(member.getId()) >= rules.maxActive()) {
@@ -70,9 +86,13 @@ public class LoanService {
         return LoanMapper.toResponse(loans.save(new Loan(book, member, now(), dueDate)));
     }
 
-    /** Same race as borrow: two returns at once both pass the check; §5.6 deals with it. */
+    /**
+     * Same race as borrow: two returns at once both see an active loan. {@code Loan.version} makes
+     * the second UPDATE match no row, so it fails (409) and the first {@code returnedAt} stays.
+     */
     @Transactional
     public LoanResponse returnLoan(Long id) {
+        audit.record("RETURN_REQUESTED", "loan " + id);
         Loan loan = getOrThrow(id);
         if (!loan.isActive()) {
             throw new ConflictException("Loan " + id + " was already returned");
@@ -81,15 +101,11 @@ public class LoanService {
         return LoanMapper.toResponse(loan);
     }
 
-    // readOnly: the mapping touches the lazy book, which needs an open persistence context (open-in-
-    // view is off). readOnly also tells Hibernate to skip dirty checking. §5.6 covers it in full.
-    @Transactional(readOnly = true)
     public LoanResponse findById(Long id) {
         return LoanMapper.toResponse(getOrThrow(id));
     }
 
     /** Loans filtered by member and/or state; each filter is optional. Books come in the same query. */
-    @Transactional(readOnly = true)
     public List<LoanResponse> findAll(Long memberId, Boolean active) {
         Specification<Loan> filters =
                 Specification.allOf(LoanSpecifications.ofMember(memberId), LoanSpecifications.active(active));

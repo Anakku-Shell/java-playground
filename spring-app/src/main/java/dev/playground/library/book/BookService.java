@@ -26,10 +26,15 @@ import org.springframework.transaction.annotation.Transactional;
 /**
  * Book use cases; takes and returns DTOs. Missing ids and broken rules are domain exceptions
  * ({@code NotFoundException}, {@code ConflictException}), mapped to HTTP in one place (§5.3).
- * {@code availableCopies} is computed from the active loans on every read. Guide: §5.2 REST API,
- * §5.4 Persistence with JPA, §5.5 Advanced JPA.
+ * {@code availableCopies} is computed from the active loans on every read.
+ *
+ * <p>{@code @Transactional(readOnly = true)} on the class gives every public method a read-only
+ * transaction: Hibernate skips the flush (no dirty checking) and PostgreSQL refuses writes. The
+ * write methods override it with their own {@code @Transactional}. Guide: §5.2 REST API, §5.4
+ * Persistence with JPA, §5.5 Advanced JPA, §5.6 Transactions.
  */
 @Service
+@Transactional(readOnly = true)
 public class BookService {
 
     /** What ?sort= may name: plain columns only (Paging.sanitize explains why). */
@@ -49,10 +54,9 @@ public class BookService {
      * One page of books, optionally filtered by title and author. A constant number of statements
      * whatever the page size: the page, a count(*) when the page is not the whole result, the authors
      * of all its books (one batch, see
-     * {@code Book.authors}), and one grouped loan count. {@code readOnly}: the mapping loads the lazy
-     * authors, which needs an open persistence context (§5.6 covers read-only transactions).
+     * {@code Book.authors}), and one grouped loan count. The class-level read-only transaction keeps the
+     * persistence context open while the mapping loads the lazy authors (open-in-view is off).
      */
-    @Transactional(readOnly = true)
     public PageResponse<BookResponse> findAll(String title, Long authorId, Pageable pageable) {
         Specification<Book> filters =
                 Specification.allOf(BookSpecifications.titleContains(title), BookSpecifications.hasAuthor(authorId));
@@ -61,7 +65,6 @@ public class BookService {
         return PageResponse.from(page.map(book -> BookMapper.toResponse(book, onLoan.getOrDefault(book.getId(), 0L))));
     }
 
-    @Transactional(readOnly = true)
     public BookResponse findById(Long id) {
         // The entity graph brings the authors in the same query.
         Book book = books.findWithAuthorsById(id).orElseThrow(() -> new NotFoundException("Book", id));

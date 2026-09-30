@@ -19,6 +19,7 @@ import org.springframework.data.core.PropertyReferenceException;
 import org.springframework.data.core.TypeInformation;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.test.web.servlet.assertj.MockMvcTester;
 import org.springframework.test.web.servlet.assertj.MvcTestResult;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
@@ -87,6 +88,25 @@ class GlobalExceptionHandlerTest {
                         """);
         // The body says nothing about tables or constraints; the log names them.
         assertThat(output).contains("WARN").contains("books_isbn_key");
+    }
+
+    @Test
+    void optimisticLockFailureIs409AskingForARetry(CapturedOutput output) {
+        // Another transaction changed the row between our read and our write (§5.6). Nothing is
+        // wrong with the request itself: sent again, it runs against the new state.
+        assertThat(mvc.post().uri("/things/concurrent"))
+                .hasStatus(HttpStatus.CONFLICT)
+                .bodyJson()
+                .isStrictlyEqualTo("""
+                        {
+                          "title": "Conflict",
+                          "status": 409,
+                          "detail": "The data was changed by another request at the same time. Retry the request.",
+                          "instance": "/things/concurrent"
+                        }
+                        """);
+        // Expected under load, not a bug: no ERROR log.
+        assertThat(output).doesNotContain("ERROR");
     }
 
     @Test
@@ -244,6 +264,11 @@ class GlobalExceptionHandlerTest {
             throw new DataIntegrityViolationException(
                     "could not execute statement [ERROR: duplicate key value violates unique constraint"
                             + " \"books_isbn_key\"]");
+        }
+
+        @PostMapping("/things/concurrent")
+        void concurrent() {
+            throw new ObjectOptimisticLockingFailureException(Object.class, 7L);
         }
 
         @GetMapping("/things/sorted")

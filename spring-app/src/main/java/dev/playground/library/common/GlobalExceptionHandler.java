@@ -10,6 +10,7 @@ import java.util.TreeMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.data.core.PropertyReferenceException;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
@@ -60,6 +61,22 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
     public ProblemDetail handleDataIntegrityViolation(DataIntegrityViolationException ex) {
         log.warn("Constraint violation: {}", ex.getMostSpecificCause().getMessage());
         return ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, "The request conflicts with existing data.");
+    }
+
+    /**
+     * Optimistic locking (§5.6): another transaction changed the row (its version) between this
+     * transaction's read and its write, so the write matched no row and everything rolled back. The
+     * request was fine; the same request sent again runs against the new state, and then either
+     * succeeds or fails a business rule with its own message. Hibernate's
+     * {@code StaleObjectStateException} reaches us translated by Spring into
+     * {@code ObjectOptimisticLockingFailureException}, a subclass of this one. Normal under load, so
+     * INFO rather than WARN or ERROR.
+     */
+    @ExceptionHandler(OptimisticLockingFailureException.class)
+    public ProblemDetail handleOptimisticLock(OptimisticLockingFailureException ex) {
+        log.info("Concurrent modification: {}", ex.getMessage());
+        return ProblemDetail.forStatusAndDetail(
+                HttpStatus.CONFLICT, "The data was changed by another request at the same time. Retry the request.");
     }
 
     /** {@code ?sort=} outside the endpoint's allow-list ({@code Paging.sanitize}, §5.5). */

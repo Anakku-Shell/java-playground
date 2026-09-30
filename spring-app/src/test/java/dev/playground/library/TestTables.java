@@ -13,6 +13,6 @@ public final class TestTables {
     private TestTables() {}
 
     public static void truncateAll(JdbcTemplate jdbc) {
-        jdbc.execute("TRUNCATE loans, book_authors, members, books, authors RESTART IDENTITY");
+        jdbc.execute("TRUNCATE loans, book_authors, members, books, authors, audit_events RESTART IDENTITY");
     }
 }

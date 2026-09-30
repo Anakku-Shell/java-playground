@@ -1,11 +1,13 @@
 package dev.playground.library.book;
 
+import jakarta.persistence.LockModeType;
 import java.util.List;
 import java.util.Optional;
 import org.springframework.data.domain.Sort;
 import org.springframework.data.jpa.repository.EntityGraph;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.JpaSpecificationExecutor;
+import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Query;
 
 /**
@@ -49,4 +51,17 @@ public interface BookRepository extends JpaRepository<Book, Long>, JpaSpecificat
     // free text: anything between find and By is ignored by the parser.
     @EntityGraph(attributePaths = "authors")
     Optional<Book> findWithAuthorsById(Long id);
+
+    /**
+     * The book for a borrow (§5.6). A borrow inserts a loan and changes no book column, so a plain
+     * version check never fires: two borrows of the last copy would both commit. This lock mode
+     * makes Hibernate bump the version at commit ({@code update books set version = ? where id = ?
+     * and version = ?}), so the second of two overlapping borrows matches no row and rolls back.
+     *
+     * <p>The pessimistic alternative is {@code @Lock(LockModeType.PESSIMISTIC_WRITE)}: a
+     * {@code select ... for update} that makes the second borrow wait for the first to commit, and
+     * then see its loan. No failed request, but every borrow of a book queues behind the others.
+     */
+    @Lock(LockModeType.OPTIMISTIC_FORCE_INCREMENT)
+    Optional<Book> findWithVersionIncrementById(Long id);
 }

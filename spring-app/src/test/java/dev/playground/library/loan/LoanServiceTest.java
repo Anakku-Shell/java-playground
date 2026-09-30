@@ -7,6 +7,7 @@ import static org.mockito.BDDMockito.given;
 import static org.mockito.BDDMockito.then;
 import static org.mockito.Mockito.never;
 
+import dev.playground.library.audit.AuditService;
 import dev.playground.library.book.Book;
 import dev.playground.library.book.BookRepository;
 import dev.playground.library.common.ConflictException;
@@ -46,6 +47,9 @@ class LoanServiceTest {
     @Mock
     private MemberRepository members;
 
+    @Mock
+    private AuditService audit;
+
     private LoanService service;
 
     private Book dune;
@@ -55,7 +59,7 @@ class LoanServiceTest {
     void setUp() {
         // Built by hand: @InjectMocks only injects mocks, and the clock and settings are real values.
         var properties = new LibraryProperties("Test library", new LibraryProperties.Loans(3, 14));
-        service = new LoanService(loans, books, members, properties, Clock.fixed(NOW, ZoneOffset.UTC));
+        service = new LoanService(loans, books, members, properties, Clock.fixed(NOW, ZoneOffset.UTC), audit);
 
         dune = withId(new Book("9780441013593", "Dune", 1965, 2), 1L);
         ada = withId(new Member("ada@library.test", "Ada Lovelace"), 7L);
@@ -67,8 +71,8 @@ class LoanServiceTest {
     }
 
     private void bookAndMemberExist() {
-        given(books.findById(1L)).willReturn(Optional.of(dune));
-        given(members.findById(7L)).willReturn(Optional.of(ada));
+        given(books.findWithVersionIncrementById(1L)).willReturn(Optional.of(dune));
+        given(members.findWithVersionIncrementById(7L)).willReturn(Optional.of(ada));
     }
 
     @Test
@@ -87,7 +91,7 @@ class LoanServiceTest {
         // truncation, the POST response and a later GET would show two different loanedAt values.
         Instant precise = Instant.parse("2026-09-30T10:00:00.123456789Z");
         var properties = new LibraryProperties("Test library", new LibraryProperties.Loans(3, 14));
-        service = new LoanService(loans, books, members, properties, Clock.fixed(precise, ZoneOffset.UTC));
+        service = new LoanService(loans, books, members, properties, Clock.fixed(precise, ZoneOffset.UTC), audit);
         bookAndMemberExist();
         given(loans.save(any(Loan.class))).willAnswer(invocation -> withId(invocation.getArgument(0), 5L));
 
@@ -129,13 +133,13 @@ class LoanServiceTest {
 
     @Test
     void unknownBookOrMemberIsNotFound() {
-        given(books.findById(1L)).willReturn(Optional.empty());
+        given(books.findWithVersionIncrementById(1L)).willReturn(Optional.empty());
         assertThatThrownBy(() -> service.borrow(new CreateLoanRequest(1L, 7L)))
                 .isInstanceOf(NotFoundException.class)
                 .hasMessage("Book 1 not found");
 
-        given(books.findById(1L)).willReturn(Optional.of(dune));
-        given(members.findById(7L)).willReturn(Optional.empty());
+        given(books.findWithVersionIncrementById(1L)).willReturn(Optional.of(dune));
+        given(members.findWithVersionIncrementById(7L)).willReturn(Optional.empty());
         assertThatThrownBy(() -> service.borrow(new CreateLoanRequest(1L, 7L)))
                 .isInstanceOf(NotFoundException.class)
                 .hasMessage("Member 7 not found");
@@ -163,6 +167,20 @@ class LoanServiceTest {
                 .isInstanceOf(ConflictException.class)
                 .hasMessage("Loan 5 was already returned");
         assertThat(loan.getReturnedAt()).isEqualTo(firstReturn); // untouched
+    }
+
+    @Test
+    void requestsAreAuditedEvenWhenTheyFail() {
+        // The audit call comes before any check, so a rejected request leaves an event too. It runs
+        // in a transaction of its own; LoanControllerIT shows the event survives the rollback.
+        given(books.findWithVersionIncrementById(1L)).willReturn(Optional.empty());
+        given(loans.findById(5L)).willReturn(Optional.empty());
+
+        assertThatThrownBy(() -> service.borrow(new CreateLoanRequest(1L, 7L))).isInstanceOf(NotFoundException.class);
+        assertThatThrownBy(() -> service.returnLoan(5L)).isInstanceOf(NotFoundException.class);
+
+        then(audit).should().record("BORROW_REQUESTED", "book 1, member 7");
+        then(audit).should().record("RETURN_REQUESTED", "loan 5");
     }
 
     @Test

@@ -7,6 +7,7 @@ import jakarta.persistence.GeneratedValue;
 import jakarta.persistence.GenerationType;
 import jakarta.persistence.Id;
 import jakarta.persistence.Table;
+import jakarta.persistence.Version;
 import java.time.Instant;
 import org.springframework.data.annotation.CreatedDate;
 import org.springframework.data.jpa.domain.support.AuditingEntityListener;
@@ -35,6 +36,11 @@ public class Member {
     @CreatedDate
     @Column(nullable = false, updatable = false)
     private Instant createdAt;
+
+    // Optimistic locking (§5.6): no endpoint edits a member, but every borrow bumps the version
+    // (MemberRepository.findWithVersionIncrementById), so two borrows by one member collide.
+    @Version
+    private long version;
 
     protected Member() {}
 

@@ -238,7 +238,8 @@ Spring Boot inverts this: **your app owns `main()` and starts an embedded Tomcat
 `LibraryApplication` starts and Tomcat listens on port 8080. It serves:
 - `/api/info` (§5.1);
 - CRUD for `/api/authors` and `/api/books` (§5.2), stored in PostgreSQL through Spring Data JPA (§5.4), with paged lists (§5.5);
-- members and loans: `/api/members`, `/api/loans` (§5.5);
+- members and loans: `/api/members`, `/api/loans` (§5.5), safe when two requests race for the same book, member or loan (§5.6);
+- an audit trail of loan requests: `/api/audit-events` (§5.6);
 - Swagger UI at `/swagger-ui.html`.
 
 Request bodies are validated, and every error is an RFC 9457 `ProblemDetail` (§5.3). On `spring-boot:run`, Spring Boot starts PostgreSQL in Docker and Flyway creates the schema before Tomcat opens the port. `LibraryApplicationIT` (`@SpringBootTest` on a throwaway PostgreSQL) boots the same context in a test, so a broken configuration fails the build.
@@ -1229,7 +1230,7 @@ Two traps are pinned by tests (each one checked by breaking the code and watchin
 - **Without `@Transactional` nothing is saved.** Each repository call then runs in its own short transaction, so `book` is already detached when the setters run. The PUT answers 200 with the new values, and the table never changes (`BookControllerIT.createReadUpdateDeleteRoundTrip` catches it).
 - **Auto flush turns the order into a bug.** Apply the changes first, and the `exists` query makes Hibernate flush the `UPDATE` before running the check. The duplicate ISBN then hits the unique constraint: the client gets the generic 409 instead of the service's message (`BookControllerIT.updateOntoAnotherBooksIsbnReturns409FromTheServiceCheck`).
 
-`@Transactional` goes on the service's write methods. §5.6 explains how it works (a proxy), `readOnly`, propagation and rollback rules.
+`@Transactional` goes on the service layer. Since §5.6 every service is read-only at class level (`@Transactional(readOnly = true)`) and its write methods add `@Transactional`. §5.6 explains how it works (a proxy), `readOnly`, propagation and rollback rules.
 
 #### Repositories and queries — `BookRepositoryIT`
 
@@ -1470,21 +1471,219 @@ public abstract class AuditedEntity {
 
 - `availableCopies` is not stored. It is `totalCopies` minus the active loans, counted on every read, so it can never drift.
 - Returning is `POST /api/loans/{id}/return`: an action on the loan, not a `PUT` of the whole resource.
-- **Two borrows of the last copy at the same moment both succeed.** Both pass the count before either inserts. §5.6 closes that race with optimistic locking.
-- **Two returns of the same loan at the same moment both answer 200**, and the second overwrites `returnedAt`, for the same reason. §5.6 covers both.
+- **Two borrows of the last copy at the same moment both succeeded** with the code of this section: both pass the count before either inserts. §5.6 closes that race with optimistic locking.
+- **Two returns of the same loan at the same moment both answered 200**, and the second overwrote `returnedAt`, for the same reason. §5.6 closes that one too.
 
 **Gotchas**
 - **`@PageableDefault(sort = "title")` also sets the page size**, to its own default of 10, not the global 20. `@SortDefault("title")` sets only the sort. A RED test caught this.
 - **`@DataJpaTest` does not load your `@Configuration` classes.** Without `@Import(JpaAuditingConfig.class)`, `created_at` is inserted as `null` and the NOT NULL constraint fails. `BookRepositoryIT` hit exactly that.
 - **Timestamps lose precision in the database.** Java's clock ticks below a microsecond on this machine, and `timestamptz` keeps microseconds. `POST /api/loans` answered `…896334700Z` while a later `GET` read `…896335Z`, the value rounded by PostgreSQL. `LoanService` truncates its "now" to microseconds.
-- **Changing only a collection does not move `updatedAt`.** A `PUT` that changes only `authorIds` rewrites `book_authors` but sends no `UPDATE` of the `books` row, so `@PreUpdate`, and with it `@LastModifiedDate`, never runs.
+- **A change to a collection alone moves `updatedAt` only on a versioned entity.** A `PUT` that changes only `authorIds` rewrites `book_authors`. `Book` has a `@Version` (§5.6), and Hibernate counts a change to a collection the entity owns as a change of the entity: it bumps the version with an `UPDATE` of the `books` row, so `@PreUpdate`, and with it `@LastModifiedDate`, runs (`AuditingIT`). On an entity without a version, no `UPDATE` of the row is sent and `updatedAt` stays.
 - **`mappedBy` side edits are silently ignored**, and so are edits to a detached entity's collection. There is no error; nothing is written.
 - **`toString`, `equals` or JSON serialisation walking a relation** loads it, or recurses forever through a bidirectional pair. Keep those methods on plain fields, and never serialise entities.
 - **Spring Data 4 moved some types.** `PropertyReferenceException` and `TypeInformation` now live in `org.springframework.data.core` (they were in `org.springframework.data.mapping`/`util`). `Specification.unrestricted()` is the "no condition" specification; older code passed `null` around instead.
 
 ### 5.6 Transactions
 
-_Written in Phase 09._
+**What it is.** A transaction groups statements into one unit: they all commit, or none of them does. §5.4 put `@Transactional` on the write methods without explaining it. This section covers:
+- how the annotation works (a proxy), and where it stops working;
+- propagation (what happens when a transactional method calls another one), rollback rules and read-only transactions;
+- isolation levels;
+- the races §5.5 left open (the last copy, the double return, and one more it did not mention), closed with **optimistic locking**.
+
+Where the code is:
+- [`V3__versions_and_audit_events.sql`](../spring-app/src/main/resources/db/migration/V3__versions_and_audit_events.sql): `version` columns on `books`, `members` and `loans`, and the `audit_events` table.
+- `Book.version`, `Member.version` and `Loan.version` (`@Version`), `BookRepository.findWithVersionIncrementById`, `MemberRepository.findWithVersionIncrementById`, `LoanService`.
+- The [`audit/`](../spring-app/src/main/java/dev/playground/library/audit/) feature: `AuditService.record` runs in its own transaction.
+- `GlobalExceptionHandler.handleOptimisticLock` (409).
+- `@Transactional(readOnly = true)` on the class of every service.
+- Tests: [`TransactionBehaviourIT`](../spring-app/src/test/java/dev/playground/library/transactions/TransactionBehaviourIT.java) (the rules, one test each), **`LoanConcurrencyIT`** (the races), `LoanControllerIT.aRejectedBorrowIsStillAudited`.
+
+Requests: [`http/09-transactions.http`](../spring-app/http/09-transactions.http).
+
+**Why it matters.** `@Transactional` looks like a keyword and behaves like a library: it works only where Spring can intercept the call, and several of its defaults surprise people (checked exceptions commit, a caught exception can still roll everything back). And a check followed by a write is not safe on its own when two requests run at once, whatever the code looks like.
+
+#### How `@Transactional` works — a proxy
+
+Spring does not change your class. At startup it wraps every bean that has `@Transactional` methods in a **proxy**, a generated subclass, and injects the proxy everywhere:
+
+```
+LoanController ──► LoanService proxy ──────────────────────► LoanService (your object)
+                   before: take a connection, BEGIN,           borrow(...) runs here
+                           open a persistence context,
+                           bind both to the current thread
+                   after:  returned         → flush, COMMIT
+                           RuntimeException → ROLLBACK
+                           then release the connection
+```
+
+- The transaction belongs to the **thread**. The repositories, `JdbcTemplate` and the `EntityManager` all find it there. Work handed to another thread (an executor, `@Async`, a parallel stream) runs outside it.
+- **Only calls that go through the proxy count.** A call from one method to another of the same object is a plain Java call on `this`: its annotation is ignored (**self-invocation**). The proxy cannot override `private` or `final` methods either: their annotations are ignored without an error (and a `final` method runs on the proxy object itself, whose injected fields are `null`). Fixes: move the method to another bean (what `AuditService` is), or call it through the injected proxy.
+- It goes on the **service layer**: a use case (check the rules, then write) is the unit of work. Each repository method already has its own short transaction (Spring Data's `SimpleJpaRepository` is annotated), which is why a service without `@Transactional` still reads, but loses its changes (§5.4).
+- `TransactionTemplate` is the same thing without the annotation, for part of a method or one transaction per batch:
+
+  ```java
+  transactionTemplate.executeWithoutResult(status -> {
+      writer.joining("Joined");     // commits if the lambda returns, rolls back if it throws
+  });
+  ```
+
+#### Propagation — `TransactionBehaviourIT`
+
+What happens when a transactional method calls another one:
+
+| Propagation | Inside a transaction | Without one |
+|---|---|---|
+| `REQUIRED` (default) | joins it: one commit, one rollback for both | starts one |
+| `REQUIRES_NEW` | suspends it, runs in a new one on a **second connection**, commits on return | starts one |
+| `SUPPORTS` | joins it | runs without |
+| `MANDATORY` | joins it | throws |
+| `NOT_SUPPORTED` | suspends it, runs without | runs without |
+| `NEVER` | throws | runs without |
+| `NESTED` | a savepoint inside it, with a plain JDBC transaction manager; **throws with JPA** | starts one |
+
+`NESTED` needs savepoints, and a savepoint would roll back the database but not the persistence context: entities would keep changes the database dropped. So `JpaTransactionManager` refuses it with `NestedTransactionNotSupportedException` (`nestedIsNotSupportedByTheJpaTransactionManager`). It works with `DataSourceTransactionManager` (plain JDBC, no JPA).
+
+`isolation`, `readOnly` and `timeout` apply only where a transaction starts. A method that joins its caller's transaction runs with the caller's settings, whatever its own annotation says.
+
+The audit trail uses `REQUIRES_NEW`. `LoanService` records every borrow and return request first, and a rejected request must still leave its event:
+
+```java
+@Transactional(propagation = Propagation.REQUIRES_NEW)
+public void record(String action, String detail) {
+    events.save(new AuditEvent(action, detail, now()));
+}   // commits here, before LoanService goes on to its checks
+```
+
+A borrow of a book with no copies left answers 409, and its transaction rolls back: no loan. The audit event committed before that and stays (`LoanControllerIT.aRejectedBorrowIsStillAudited`; with `REQUIRED` it is rolled back too and the test fails). `GET /api/audit-events` shows it.
+
+Two consequences, both deliberate here and both written down in `AuditService`:
+- **It fails closed.** If the audit insert fails, its exception reaches `borrow`, which fails and rolls back too: nothing happens unaudited.
+- **Every borrow and return holds two connections for a moment**, its own and the audit's. That is the pool trap in the gotchas below. Fine at this scale; under load, write the event after the commit instead (§5.9) and accept that a crash in between loses it.
+
+The tests pin each case, and each one failed when the code was broken on purpose:
+
+| Test | Shows |
+|---|---|
+| `requiredJoinsTheCallersTransaction` | the outer rollback undoes the inner write |
+| `requiresNewCommitsOnItsOwn` | the inner write survives the outer rollback |
+| `catchingAnInnerFailureDoesNotSaveTheCallersTransaction` | see *Rollback-only* below |
+| `aCheckedExceptionCommitsByDefault` / `rollbackForMakesACheckedExceptionRollBack` | the rollback rules |
+| `selfInvocationSkipsTheProxy` | `REQUIRES_NEW` ignored on a call through `this` (the transaction keeps the outer method's name) |
+| `aReadOnlyTransactionDoesNotWrite` | read-only: no flush, and PostgreSQL refuses a write |
+| `nestedIsNotSupportedByTheJpaTransactionManager` | `NESTED` throws with JPA |
+
+**Rollback-only.** When an exception leaves a method that *joined* a transaction, the proxy cannot roll back yet (the caller owns the transaction), so it marks the transaction **rollback-only**. Catching the exception in the caller does not clear the mark. The caller returns normally, the commit finds the mark, rolls back, and throws `UnexpectedRollbackException: Transaction silently rolled back because it has been marked as rollback-only`. If a failure really is optional, run that call in `REQUIRES_NEW`, or check before calling instead of catching.
+
+#### Rollback rules
+
+- **Unchecked exceptions (`RuntimeException`, `Error`) roll back. Checked exceptions commit.** A method that throws `IOException` after a write commits the write. The rule comes from EJB, where a checked exception was a business outcome, not a failure.
+- `@Transactional(rollbackFor = Exception.class)` rolls back on checked ones too; `noRollbackFor` does the opposite.
+- The domain exceptions here (`NotFoundException`, `ConflictException`) are unchecked, so a broken rule always rolls back.
+
+#### Read-only transactions
+
+Every service carries `@Transactional(readOnly = true)` on the class, and its write methods override it with `@Transactional`. The method-level annotation wins. Spring Data's own repositories follow the same pattern. A read-only transaction:
+- sets Hibernate's flush mode to manual: no dirty checking, no flush. An entity changed by mistake is not written (`aReadOnlyTransactionDoesNotWrite`), and Hibernate keeps no snapshots to compare, so it uses less memory;
+- marks the JDBC connection read-only. PostgreSQL then runs a `READ ONLY` transaction and refuses any write: `cannot execute INSERT in a read-only transaction`.
+
+Why a transaction for reads at all: any transaction, read-only or not, keeps the persistence context open for the whole method, and lazy loading needs that now that open-in-view is off (§5.5). It also lets a router send read-only transactions to a replica (not done here).
+
+#### Isolation levels
+
+What one transaction can see of another one's uncommitted or later work. `@Transactional(isolation = ...)` sets it per method; by default the database's own default applies, **READ COMMITTED** on PostgreSQL.
+
+| Level | Dirty read | Non-repeatable read | Phantom | Notes on PostgreSQL |
+|---|---|---|---|---|
+| READ UNCOMMITTED | possible | possible | possible | behaves as READ COMMITTED |
+| **READ COMMITTED** | no | possible | possible | the default: each statement sees what was committed when it started |
+| REPEATABLE READ | no | no | no (in PostgreSQL) | one snapshot per transaction; updating a row someone else changed fails (`could not serialize access`) |
+| SERIALIZABLE | no | no | no | as if the transactions ran one after the other; conflicts fail with SQLState `40001`, and the client retries |
+
+The last-copy race is a *check, then insert a different row* pattern. REPEATABLE READ does not stop it: both transactions insert their own loan, and nothing conflicts. SERIALIZABLE does, at the price of retrying failed transactions everywhere. Optimistic locking fixes this one place instead.
+
+#### Optimistic locking — the races
+
+Two borrows of the last copy, one copy, READ COMMITTED:
+
+```
+T1 (Ada)                         T2 (Alan)
+count active loans → 0
+                                 count active loans → 0   (T1's loan is not committed)
+insert loan
+                                 insert loan
+COMMIT                           COMMIT                   → two loans for one copy
+```
+
+**Returning** is the simpler case, because both transactions update the same row. `@Version` on `Loan` makes Hibernate check the version it read:
+
+```java
+@Version
+private long version;
+```
+```sql
+update loans set ..., returned_at=?, version=1 where id=? and version=0
+```
+
+The second UPDATE matches no row. Hibernate throws `StaleObjectStateException`, Spring translates it into `ObjectOptimisticLockingFailureException`, and everything the second transaction did rolls back. `returnedAt` keeps the first value.
+
+**Borrowing** changes no existing row: each transaction inserts its own loan, so there is no row to compare versions on. The book becomes that row. `LoanService` reads it with a lock mode that bumps its version at commit, whether or not a book column changed:
+
+```java
+@Lock(LockModeType.OPTIMISTIC_FORCE_INCREMENT)
+Optional<Book> findWithVersionIncrementById(Long id);
+```
+```
+T1: ... insert loan ... COMMIT: update books set version=1 where id=4 and version=0   → 1 row
+T2: ... insert loan ... COMMIT: update books set version=1 where id=4 and version=0
+    (waits for T1's row lock, then PostgreSQL re-checks the WHERE on the new row)     → 0 rows
+    → the version check fails, and T2 rolls back, its loan with it
+```
+
+- `GlobalExceptionHandler` turns `OptimisticLockingFailureException` into **409** `The data was changed by another request at the same time. Retry the request.` A retry runs against the new state: the loser of the borrow race then gets `Book 4 has no available copies`, the loser of the return race `Loan 5 was already returned`. It logs at INFO: under load this is normal, not a bug.
+- `Book.version` also moves with every edit (`update books set ..., version=? where id=? and version=?`), so an edit and a borrow racing each other collide as well: the one that commits second gets the 409 (`anEditAndABorrowOfTheSameBookCollide`). A borrow cannot slip past a `totalCopies` change it never saw.
+
+**Each rule needs its own row to collide on.** The review of this chapter found a third race: a member with 2 loans (the maximum is 3) borrows two *different* books at once. Both pass the member count, and the two book versions are different rows, so both commit: 4 loans. The member row is the one both borrows share, so `borrow` reads the member with `OPTIMISTIC_FORCE_INCREMENT` too (`members.version`, `aMemberCannotPassTheMaximumWithTwoBorrowsAtOnce`). The general question for any check-then-write: *which row would both transactions have to update if they conflict?* If there is none, make one.
+- Hibernate owns the version. A plain SQL `UPDATE` that does not bump it goes unnoticed. SQL Server's `rowversion`, in contrast, is maintained by the database.
+- By default Hibernate's UPDATE sets every column, not only the changed ones (see the `update loans` above). `@DynamicUpdate` changes that; it rarely matters.
+
+**The alternatives**
+
+| Approach | How | Trade-off |
+|---|---|---|
+| Optimistic (used here) | `@Version`, `OPTIMISTIC_FORCE_INCREMENT` | Nobody waits; the loser gets a 409 and retries. Best when collisions are rare |
+| Pessimistic | `@Lock(LockModeType.PESSIMISTIC_WRITE)` → `select ... for update` | The second borrow waits for the first to commit, then sees its loan: no failed request. Every borrow of that book queues; keep such transactions short, and lock rows in a fixed order to avoid deadlocks |
+| Conditional UPDATE | `update loans set returned_at = ? where id = ? and returned_at is null` (`@Modifying @Query`), then check the row count | One statement for the return. Bypasses the entity, so no dirty checking or listeners |
+| SERIALIZABLE | the isolation level above | Covers every race, and every transaction needs a retry |
+| Automatic retry | Spring Framework 7's `@Retryable` (with `@EnableResilientMethods`) | Hides the 409. The retry must wrap the transactional call: retrying inside the failed transaction is useless, it is already rolled back |
+
+**Lost updates across requests.** The version here protects the few milliseconds of one transaction. "I opened the edit form, someone else saved, then I saved" spans two requests: the second `PUT` reads the new version and overwrites the other change. The HTTP answer is to send the version to the client (an `ETag` header), require it back (`If-Match`), and answer `412 Precondition Failed` when it no longer matches. Not implemented here.
+
+#### Forcing the race in a test — `LoanConcurrencyIT`
+
+Two threads started at the same moment rarely overlap: a request takes milliseconds, and the second one usually starts after the first has committed. It sees the loan and fails the check, so the test passes even without the fix. The test forces the overlap instead:
+
+```java
+statement.execute("LOCK TABLE loans IN EXCLUSIVE MODE");   // in a transaction of the test's own
+// start both requests; EXCLUSIVE lets their SELECTs through and blocks their INSERT/UPDATE
+await().until(() -> a.isDone() || b.isDone() || sessionsWaitingOn("loans") == 2);   // pg_locks
+// a request that already finished never reached its write: fail at once, there was no race
+lockHolder.commit();                                        // release: both race to commit
+```
+
+The edit-versus-borrow test locks `books` instead: the edit's `UPDATE` and the borrow's foreign key check on its new loan both wait there.
+
+Without the versions, both borrows answered 201 (in each of the two borrow races) and both returns 200. With them: one success and one 409 every time, and the loser wrote nothing.
+
+**Gotchas**
+- **Self-invocation, `private` and `final` methods.** The annotation is ignored, silently. Put the method on another bean.
+- **A caught exception can still roll everything back** (rollback-only, above).
+- **Checked exceptions commit.**
+- **`REQUIRES_NEW` holds two connections at once.** With a pool of 10, ten requests that each hold one connection and wait for a second one block each other until the pool times out (30 s) and fails them all. This app does it on every borrow and return (the audit). Keep the inner transaction short, and never nest it in a loop.
+- **Keep transactions short.** A transaction holds a connection and its row locks until it ends. Do not call a slow HTTP service inside one (§5.9).
+- **`@DataJpaTest` wraps each test in a transaction and rolls it back at the end.** Handy, but nothing inside ever commits: commit behaviour, `REQUIRES_NEW` and races need a test without that transaction, like `TransactionBehaviourIT` and `LoanConcurrencyIT` (`@SpringBootTest`, tables emptied before each test).
+- **Two `@Transactional` annotations exist.** Spring's (`org.springframework.transaction.annotation`) and Jakarta's (`jakarta.transaction.Transactional`). Spring honours both. Jakarta's has the same propagation names except `NESTED` (`@Transactional(TxType.REQUIRES_NEW)`) and `rollbackOn` instead of `rollbackFor`, but no `readOnly`, `isolation` or `timeout`. Use Spring's.
+- **A version bump is an UPDATE of the row**, so `@LastModifiedDate` moves with it (§5.5).
 
 ### 5.7 Security
 
@@ -1624,6 +1823,11 @@ A map for orientation, not a claim that the pieces are identical. It grows with 
 | Connection string in `appsettings.json` | `spring.datasource.*`, or none: Docker Compose support / `@ServiceConnection` | |
 | .NET Aspire / Testcontainers for .NET | `spring-boot-docker-compose` / Testcontainers for Java | The Java Testcontainers is the original |
 | `DbUpdateException` (unique index violation) | `DataIntegrityViolationException` | Spring translates every vendor's SQL errors into one `DataAccessException` hierarchy |
+| `SaveChanges()` (its own transaction), `BeginTransaction()`, `TransactionScope` | `@Transactional` on the service method, or `TransactionTemplate` | Declarative, through a proxy (§5.6) |
+| `TransactionScopeOption.RequiresNew` | `@Transactional(propagation = Propagation.REQUIRES_NEW)` | Also a second connection |
+| `BeginTransaction(IsolationLevel.Serializable)` | `@Transactional(isolation = Isolation.SERIALIZABLE)` | |
+| `[ConcurrencyCheck]`, `[Timestamp]` / `IsRowVersion()` | `@Version` | SQL Server bumps a `rowversion` itself; Hibernate bumps `@Version` in its own UPDATE |
+| `DbUpdateConcurrencyException` | `ObjectOptimisticLockingFailureException` | Spring's translation of Hibernate's `StaleObjectStateException` |
 
 **LINQ ↔ Streams**
 
@@ -1671,5 +1875,8 @@ A map for orientation, not a claim that the pieces are identical. It grows with 
 - **`@ManyToOne` loads eagerly by default.** EF loads nothing you did not `Include`. JPA loads every to-one relation unless you write `fetch = FetchType.LAZY` (§5.5).
 - **Only one side of a relation is written.** EF fixes up both navigation properties. In JPA, adding to the `mappedBy` side does nothing, without an error (§5.5).
 - **A lazy relation outside the transaction throws.** `LazyInitializationException` means the data was needed after the service returned. Fetch it in the query or map inside the transaction; do not turn open-in-view back on (§5.5).
+- **Checked exceptions do not roll back.** A `@Transactional` method that throws `IOException` commits what it wrote. Only unchecked exceptions roll back, unless you add `rollbackFor` (§5.6).
+- **`@Transactional` works only through the proxy.** A call to a method of the same class, or to a `private` method, runs without its annotation, and nothing tells you (§5.6).
+- **Catching an exception does not save the transaction.** If it came out of a method that joined your transaction, the commit fails with `UnexpectedRollbackException` (§5.6).
 - **Pages start at 0.** `?page=1` is the second page.
 - **The schema is not generated from the classes.** Flyway runs your SQL; Hibernate only validates. Adding a field to an entity means writing a migration too, or the app does not start.

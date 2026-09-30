@@ -27,6 +27,9 @@ class LibraryApplicationIT {
         // flyway_schema_history, the table where Flyway records what it applied.
         assertThat(flyway.info().applied())
                 .extracting(MigrationInfo::getScript)
-                .containsExactly("V1__create_authors_and_books.sql", "V2__book_authors_members_loans.sql");
+                .containsExactly(
+                        "V1__create_authors_and_books.sql",
+                        "V2__book_authors_members_loans.sql",
+                        "V3__versions_and_audit_events.sql");
     }
 }

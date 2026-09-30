@@ -11,12 +11,13 @@ import jakarta.persistence.Id;
 import jakarta.persistence.JoinColumn;
 import jakarta.persistence.ManyToOne;
 import jakarta.persistence.Table;
+import jakarta.persistence.Version;
 import java.time.Instant;
 import java.time.LocalDate;
 
 /**
  * One book lent to one member, mapped to {@code loans} (V2). Active while {@code returnedAt} is
- * null. Guide: §5.5 Advanced JPA.
+ * null. Guide: §5.5 Advanced JPA, §5.6 Transactions (the version).
  */
 @Entity
 @Table(name = "loans")
@@ -45,6 +46,11 @@ public class Loan {
     private LocalDate dueDate;
 
     private Instant returnedAt;
+
+    // Optimistic locking (§5.6): returning a loan is an UPDATE of this row, and the version check
+    // makes the second of two concurrent returns fail instead of overwriting returnedAt.
+    @Version
+    private long version;
 
     protected Loan() {}
 

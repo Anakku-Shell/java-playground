@@ -16,8 +16,9 @@ import org.springframework.data.jpa.domain.support.AuditingEntityListener;
  * <p>{@code AuditingEntityListener} is a JPA entity listener: Hibernate calls it on {@code persist}
  * ({@code @PrePersist}) and before it flushes an UPDATE of the row ({@code @PreUpdate}), and it fills
  * the annotated fields (enabled by {@code JpaAuditingConfig}). A change to a collection alone (the
- * book_authors rows) sends no UPDATE of the row, so {@code updatedAt} stays. No
- * setters: nothing else writes them. Guide: §5.5 Advanced JPA.
+ * book_authors rows) updates the row only because {@code Book} has a {@code @Version}: Hibernate
+ * bumps it, and {@code updatedAt} moves with it. An unversioned entity would keep its
+ * {@code updatedAt}. No setters: nothing else writes them. Guide: §5.5 Advanced JPA, §5.6.
  */
 @MappedSuperclass
 @EntityListeners(AuditingEntityListener.class)

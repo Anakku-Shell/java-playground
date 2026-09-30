@@ -9,9 +9,11 @@ import org.springframework.transaction.annotation.Transactional;
 
 /**
  * Member use cases. Registration with a password replaces {@code create} in §5.7 (security).
- * Guide: §5.5 Advanced JPA.
+ * Transactions as in BookService: read-only by default, read-write on {@code create}. Guide: §5.5
+ * Advanced JPA.
  */
 @Service
+@Transactional(readOnly = true)
 public class MemberService {
 
     private final MemberRepository repository;

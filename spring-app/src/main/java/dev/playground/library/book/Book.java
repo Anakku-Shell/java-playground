@@ -11,6 +11,7 @@ import jakarta.persistence.JoinColumn;
 import jakarta.persistence.JoinTable;
 import jakarta.persistence.ManyToMany;
 import jakarta.persistence.Table;
+import jakarta.persistence.Version;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.Set;
@@ -19,7 +20,8 @@ import org.hibernate.annotations.BatchSize;
 /**
  * A JPA entity: Hibernate maps it to the {@code books} table created by Flyway (V1). It never leaves
  * the service layer. See {@code Author} for the rules every entity here follows. The authors
- * relation and the audit timestamps arrive in §5.5. Guide: §5.4 Persistence with JPA, §5.5.
+ * relation and the audit timestamps arrive in §5.5, the version in §5.6. Guide: §5.4 Persistence
+ * with JPA, §5.5, §5.6.
  */
 @Entity
 @Table(name = "books")
@@ -42,6 +44,13 @@ public class Book extends AuditedEntity {
 
     @Column(nullable = false)
     private int totalCopies;
+
+    // Optimistic locking (§5.6): every UPDATE of the row adds "and version = ?" and bumps the
+    // number, so a transaction that read an older version fails instead of overwriting. Hibernate
+    // alone writes it: no setter. A borrow bumps it too, without changing any other column
+    // (BookRepository.findWithVersionIncrementById).
+    @Version
+    private long version;
 
     // The owning side of the relation: Hibernate writes book_authors from this set (Author.books is
     // the inverse side). A collection is LAZY by default: the set is loaded the first time it is

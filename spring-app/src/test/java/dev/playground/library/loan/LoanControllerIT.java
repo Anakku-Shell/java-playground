@@ -133,6 +133,22 @@ class LoanControllerIT {
     }
 
     @Test
+    void aRejectedBorrowIsStillAudited() {
+        Book noCopies = books.save(new Book("9780061054884", "The Dispossessed", 1974, 0));
+
+        assertThat(borrow(noCopies, ada)).hasStatus(HttpStatus.CONFLICT);
+
+        // The borrow's transaction rolled back, so no loan. The audit event was written in a
+        // transaction of its own (REQUIRES_NEW), which had committed before the 409 was thrown.
+        assertThat(jdbc.queryForObject("select count(*) from loans", Long.class))
+                .isZero();
+        assertThat(mvc.get().uri("/api/audit-events")).bodyJson().isLenientlyEqualTo("""
+                [{"action": "BORROW_REQUESTED", "detail": "book %d, member %d"}]
+                """.formatted(
+                        noCopies.getId(), ada.getId()));
+    }
+
+    @Test
     void aMemberCannotHoldMoreThanTheMaximum() {
         // library.loans.max-active defaults to 3.
         for (String isbn : new String[] {"9780593098233", "9780141439587", "9780345539434"}) {

@@ -17,10 +17,12 @@ import org.springframework.transaction.annotation.Transactional;
 
 /**
  * Author use cases. Takes and returns DTOs, so the controller never touches {@link Author}. The
- * business rules and the transactions live here. Guide: §5.2 REST API, §5.4 Persistence with JPA,
- * §5.5 Advanced JPA.
+ * business rules and the transactions live here: read-only by default (class level), read-write on
+ * the write methods (see BookService). Guide: §5.2 REST API, §5.4 Persistence with JPA, §5.5
+ * Advanced JPA, §5.6 Transactions.
  */
 @Service
+@Transactional(readOnly = true)
 public class AuthorService {
 
     private static final Set<String> SORTABLE = Set.of("id", "name", "birthYear");

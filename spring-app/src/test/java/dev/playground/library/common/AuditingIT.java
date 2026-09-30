@@ -5,9 +5,11 @@ import static org.mockito.BDDMockito.given;
 
 import dev.playground.library.TestcontainersConfiguration;
 import dev.playground.library.author.Author;
+import dev.playground.library.book.Book;
 import dev.playground.library.config.JpaAuditingConfig;
 import java.time.Clock;
 import java.time.Instant;
+import java.util.Set;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.data.jpa.test.autoconfigure.DataJpaTest;
@@ -57,5 +59,27 @@ class AuditingIT {
         Author reloaded = em.find(Author.class, author.getId());
         assertThat(reloaded.getCreatedAt()).isEqualTo(CREATED);
         assertThat(reloaded.getUpdatedAt()).isEqualTo(EDITED);
+    }
+
+    @Test
+    void changingOnlyTheAuthorsOfABookIsAnUpdateOfTheBook() {
+        given(clock.instant()).willReturn(CREATED);
+        Author herbert = em.persist(new Author("Frank Herbert", 1920));
+        Book dune = em.persistAndFlush(new Book("9780441013593", "Dune", 1965, 1));
+
+        given(clock.instant()).willReturn(EDITED);
+        dune.replaceAuthors(Set.of(herbert));
+        em.flush(); // an INSERT into book_authors, and an UPDATE of the book itself:
+        em.clear();
+
+        // Book has a @Version (§5.6), and a change to a collection it owns counts as a change of the
+        // book. Hibernate bumps the version, and the listener sets updatedAt on that UPDATE. Without
+        // the version, no UPDATE of the row would be sent and updatedAt would stay at CREATED.
+        Object[] row = (Object[]) em.getEntityManager()
+                .createNativeQuery("select version, updated_at from books where id = ?1")
+                .setParameter(1, dune.getId())
+                .getSingleResult();
+        assertThat(row[0]).isEqualTo(1L);
+        assertThat(row[1]).isEqualTo(EDITED);
     }
 }

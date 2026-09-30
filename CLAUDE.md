@@ -8,7 +8,7 @@ concept's code updates its guide section.
 
 - `pom.xml`: the parent POM (Spring Boot parent, Java version, Spotless, Failsafe). Modules: `java-core`, `spring-app`.
 - `java-core/`: plain Java, **no Spring**. Examples are tests: `src/test/java/dev/playground/core/<topic>/<Concept>Test.java`; supporting types go in `src/main/java/dev/playground/core/<topic>/`.
-- `spring-app/`: the library API, package `dev.playground.library`, organised **by feature** (`book/`, `author/`, `loan/`, `member/`, `security/`), plus `config/` (cross-cutting beans) and `common/` (errors, shared DTOs).
+- `spring-app/`: the library API, package `dev.playground.library`, organised **by feature** (`book/`, `author/`, `loan/`, `member/`, `audit/`, `security/`), plus `config/` (cross-cutting beans) and `common/` (errors, shared DTOs).
   - A feature holds `XController` (HTTP only), `XService` (rules and transactions), `XRepository`, the entity `X`, `XMapper` (manual static mapping) and `dto/` (records).
   - `src/main/resources/db/migration/`: Flyway migrations (`V<n>__<desc>.sql`); never edit an applied one.
   - `http/NN-topic.http`: sample requests per chapter (VS Code REST Client).
