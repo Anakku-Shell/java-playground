@@ -47,11 +47,16 @@ JOIN books b ON b.isbn = v.isbn
 JOIN authors a ON a.name = v.author
 ON CONFLICT DO NOTHING;
 
-INSERT INTO members (email, full_name)
-VALUES ('ada@library.test', 'Ada Lovelace'),
-       ('alan@library.test', 'Alan Turing'),
-       ('grace@library.test', 'Grace Hopper')
-ON CONFLICT (email) DO NOTHING;
+-- §5.7: every demo user's password is "demo-password" (dev only; README lists the users). The value
+-- stored is its BCrypt hash, made with the application's PasswordEncoder: the "{bcrypt}" prefix names
+-- the algorithm. DO UPDATE instead of DO NOTHING, so a database created before V4 gets the
+-- credentials too. The librarian comes last, so the members keep ids 1 to 3.
+INSERT INTO members (email, full_name, password_hash, role)
+VALUES ('ada@library.test', 'Ada Lovelace', '{bcrypt}$2a$10$4CE3F94pjILsNaAffG57xelw6RmanN7N9YruW9Ww4gs9RNAsos94W', 'MEMBER'),
+       ('alan@library.test', 'Alan Turing', '{bcrypt}$2a$10$4CE3F94pjILsNaAffG57xelw6RmanN7N9YruW9Ww4gs9RNAsos94W', 'MEMBER'),
+       ('grace@library.test', 'Grace Hopper', '{bcrypt}$2a$10$4CE3F94pjILsNaAffG57xelw6RmanN7N9YruW9Ww4gs9RNAsos94W', 'MEMBER'),
+       ('librarian@library.test', 'Libby Rarian', '{bcrypt}$2a$10$4CE3F94pjILsNaAffG57xelw6RmanN7N9YruW9Ww4gs9RNAsos94W', 'LIBRARIAN')
+ON CONFLICT (email) DO UPDATE SET password_hash = EXCLUDED.password_hash, role = EXCLUDED.role;
 
 -- Loans, dated relative to the day the script ran (it reruns only when this file changes, so on an
 -- old database the dates age): Ada has Dune out and returned Emma; Alan has the only copy of The

@@ -30,6 +30,7 @@ class LibraryApplicationIT {
                 .containsExactly(
                         "V1__create_authors_and_books.sql",
                         "V2__book_authors_members_loans.sql",
-                        "V3__versions_and_audit_events.sql");
+                        "V3__versions_and_audit_events.sql",
+                        "V4__members_credentials.sql");
     }
 }

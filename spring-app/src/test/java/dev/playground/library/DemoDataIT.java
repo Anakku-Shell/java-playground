@@ -17,6 +17,7 @@ import org.springframework.core.io.ClassPathResource;
 import org.springframework.data.domain.Sort;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.init.ResourceDatabasePopulator;
+import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.test.context.ActiveProfiles;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 
@@ -48,6 +49,9 @@ class DemoDataIT {
     @Autowired
     private PostgreSQLContainer postgres;
 
+    @Autowired
+    private PasswordEncoder passwordEncoder;
+
     @Test
     void devProfileLoadsTheDemoData() {
         // Ids in the script's order, so .http files can rely on "author 1 is Frank Herbert".
@@ -56,8 +60,14 @@ class DemoDataIT {
                 .containsExactly("Frank Herbert", "Ursula K. Le Guin", "Jane Austen", "Carl Sagan", "Mary Beard");
         assertThat(books.count()).isEqualTo(10);
         assertThat(rows("book_authors")).isEqualTo(10);
-        assertThat(rows("members")).isEqualTo(3);
+        assertThat(rows("members")).isEqualTo(4);
         assertThat(rows("loans")).isEqualTo(4);
+        // §5.7: one librarian, and every demo user logs in with "demo-password" (README).
+        assertThat(jdbc.queryForList("select email from members where role = 'LIBRARIAN'", String.class))
+                .containsExactly("librarian@library.test");
+        assertThat(jdbc.queryForList("select password_hash from members", String.class))
+                .allSatisfy(hash -> assertThat(passwordEncoder.matches("demo-password", hash))
+                        .isTrue());
         // One copy of The Dispossessed, on loan: the .http file borrows it for a 409.
         assertThat(jdbc.queryForObject(
                         "select count(*) from loans l join books b on b.id = l.book_id"
@@ -91,7 +101,7 @@ class DemoDataIT {
         assertThat(authors.count()).isEqualTo(5);
         assertThat(books.count()).isEqualTo(10);
         assertThat(rows("book_authors")).isEqualTo(10);
-        assertThat(rows("members")).isEqualTo(3);
+        assertThat(rows("members")).isEqualTo(4);
         assertThat(rows("loans")).isEqualTo(4);
     }
 }

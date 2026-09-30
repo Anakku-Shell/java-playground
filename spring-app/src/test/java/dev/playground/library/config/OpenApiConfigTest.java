@@ -19,6 +19,16 @@ class OpenApiConfigTest {
                     OpenAPI api = context.getBean(OpenAPI.class);
                     assertThat(api.getInfo().getTitle()).isEqualTo("Test Library");
                     assertThat(api.getInfo().getVersion()).isEqualTo("v1");
+                    // §5.7: Swagger UI shows an "Authorize" button for the bearer token, and sends it
+                    // with every request once set.
+                    assertThat(api.getComponents()
+                                    .getSecuritySchemes()
+                                    .get("bearer")
+                                    .getScheme())
+                            .isEqualTo("bearer");
+                    assertThat(api.getSecurity())
+                            .extracting(r -> r.containsKey("bearer"))
+                            .containsExactly(true);
                 });
     }
 

@@ -77,7 +77,7 @@ Run them from the repo root. On PowerShell, use `.\mvnw` instead of `./mvnw`.
 | `./mvnw verify` | Full check: compile, unit tests, integration tests, formatting check. **The "is everything OK?" command.** |
 | `./mvnw test` | Compile and run the unit tests only (fast, no Docker) |
 | `./mvnw spotless:apply` | Format all Java code |
-| `./mvnw -pl spring-app spring-boot:run` | Run the API on http://localhost:8080 (`Ctrl+C` stops it) |
+| `./mvnw -pl spring-app spring-boot:run -Dspring-boot.run.profiles=dev` | Run the API on http://localhost:8080 with the demo data and users (`Ctrl+C` stops it). Without the dev profile it needs a JWT secret, `LIBRARY_SECURITY_JWT_SECRET` (§5.7) |
 | `./mvnw -pl java-core test -Dtest=SanityTest` | Run one test class (`-Dtest=Class#method` for one method) |
 | `./mvnw clean` | Delete the `target/` folders |
 | `./mvnw -pl spring-app package` | Build the executable jar in `spring-app/target/` |
@@ -240,6 +240,7 @@ Spring Boot inverts this: **your app owns `main()` and starts an embedded Tomcat
 - CRUD for `/api/authors` and `/api/books` (§5.2), stored in PostgreSQL through Spring Data JPA (§5.4), with paged lists (§5.5);
 - members and loans: `/api/members`, `/api/loans` (§5.5), safe when two requests race for the same book, member or loan (§5.6);
 - an audit trail of loan requests: `/api/audit-events` (§5.6);
+- registration and login, `/api/auth/*` (§5.7). Every other endpoint except `/api/info` and the API docs needs a JWT bearer token, and roles and ownership decide what it may do;
 - Swagger UI at `/swagger-ui.html`.
 
 Request bodies are validated, and every error is an RFC 9457 `ProblemDetail` (§5.3). On `spring-boot:run`, Spring Boot starts PostgreSQL in Docker and Flyway creates the schema before Tomcat opens the port. `LibraryApplicationIT` (`@SpringBootTest` on a throwaway PostgreSQL) boots the same context in a test, so a broken configuration fails the build.
@@ -1072,7 +1073,7 @@ springdoc reads the constraints into the schema. `@NotBlank` fields are listed u
 - **Cascading needs `@Valid`.** In a request body, a nested object's constraints (or a list element's) are ignored unless the field or type argument that holds it has `@Valid` (`CascadingValidationTest`). `@ConfigurationProperties` binding is the exception: Boot validates nested objects anyway.
 - **A missing primitive fails before validation.** Jackson rejects a missing `int totalCopies` while reading the body. The 400 then says only `"Failed to read request"`, with no `errors` map. For a per-field message, use `Integer` with `@NotNull`.
 - **Two exceptions for one kind of mistake.** A bad body arrives as `MethodArgumentNotValidException` or as `HandlerMethodValidationException`, depending on whether any parameter of that method has a constraint. Handle both.
-- **The catch-all handler catches too much.** From §5.7, Spring Security's `AccessDeniedException` must reach the security filters to become a 403. A generic `@ExceptionHandler(Exception.class)` would turn it into a 500 unless it is handled or rethrown first. The same happens to an exception class annotated with `@ResponseStatus`: that annotation is read by a resolver that runs after the advice, so the catch-all gets there first.
+- **The catch-all handler catches too much.** A generic `@ExceptionHandler(Exception.class)` also catches exceptions that mean something else: Spring Security's `AccessDeniedException` (403) and `AuthenticationException` (401), and any exception class annotated with `@ResponseStatus` (that annotation is read by a resolver that runs after the advice). Each becomes a 500 unless it has its own handler. §5.7 adds them.
 - **Never echo an unexpected exception's message.** It can contain SQL, file paths or data. The 500 body is generic on purpose; the log has the rest.
 
 ### 5.4 Persistence with JPA
@@ -1687,7 +1688,194 @@ Without the versions, both borrows answered 201 (in each of the two borrow races
 
 ### 5.7 Security
 
-_Written in Phase 10._
+**What it is.** Until now anyone could call anything. Security answers two separate questions:
+
+- **Authentication** (who are you?). A member logs in with an email and password and gets a signed token, a **JWT**. Every later request carries it: `Authorization: Bearer <token>`. No token, or a bad one, is **401 Unauthorized**.
+- **Authorization** (what may you do?). Rules by role (a MEMBER reads the catalogue and borrows; a LIBRARIAN also edits it and sees every loan) and by ownership (a member returns only their own loans). Known but not allowed is **403 Forbidden**.
+
+Spring Security does both. The API plays two parts: it issues tokens (login), and it accepts them on every request as an **OAuth2 resource server**.
+
+Where the code is:
+- [`V4__members_credentials.sql`](../spring-app/src/main/resources/db/migration/V4__members_credentials.sql): `password_hash` and `role` on `members`. `Member`, `Role`.
+- The [`security/`](../spring-app/src/main/java/dev/playground/library/security/) package:
+  - `SecurityConfig`: the filter chain, the URL rules, the `PasswordEncoder`, CORS.
+  - `JwtConfig`: the key, the encoder and decoder, and the claims → authorities mapping.
+  - `TokenService`: issues the tokens.
+  - `AuthController`: `/api/auth/register` and `/api/auth/login`.
+  - `AuthenticationConfig` and `MemberUserDetailsService`: the password check.
+  - `CurrentMember`, `SecurityProblemHandler`, `LibrarySecurityProperties`.
+- `LoanService` (`@PreAuthorize`), `LoanAccess`, `MyLoansController`, `MemberController` (`/me`).
+- `GlobalExceptionHandler`: 401 and 403 as ProblemDetail.
+- Tests:
+  - [`JwtAuthIT`](../spring-app/src/test/java/dev/playground/library/security/JwtAuthIT.java): the token through the whole chain.
+  - `AuthControllerIT`: register and login.
+  - [`LoanSecurityIT`](../spring-app/src/test/java/dev/playground/library/loan/LoanSecurityIT.java): who may see and touch which loan.
+  - `TokenServiceTest`, `CorsTest`, `CurrentMemberTest`, `MemberUserDetailsServiceTest`, `MaxBytesTest`.
+  - The URL rules in `BookControllerTest` and `AuthorControllerTest`.
+
+Requests: [`http/10-security.http`](../spring-app/http/10-security.http). The dev profile's users all have the password `demo-password`:
+
+| User | Role | Id |
+|---|---|---|
+| `ada@library.test`, `alan@library.test`, `grace@library.test` | MEMBER | 1, 2, 3 |
+| `librarian@library.test` | LIBRARIAN | 4 |
+
+**Why it matters.** The rules are only as good as the order they are checked in and the gaps between them. Most security bugs are an endpoint nobody listed, or a check that answers differently depending on data the caller should not learn.
+
+#### The filter chain
+
+Spring Security is a chain of **servlet filters** in front of Spring MVC. Every request passes through it before any controller:
+
+```
+request
+  │
+  ▼  SecurityFilterChain (SecurityConfig)
+  ├─ CorsFilter                       preflight OPTIONS answered here, before any token check
+  ├─ BearerTokenAuthenticationFilter  "Authorization: Bearer ..." present?
+  │     │ yes → JwtDecoder: signature, exp, iss   ── fails ─► 401 (invalid_token)
+  │     ▼       JwtAuthenticationConverter → Authentication (name = sub, authorities = ROLE_*)
+  │           stored in the SecurityContext (one per request thread)
+  ├─ ExceptionTranslationFilter       turns a later AuthenticationException into 401,
+  │                                   AccessDeniedException into 403
+  ├─ AuthorizationFilter              URL rules: permitAll / authenticated / hasRole
+  │                                   anonymous on a protected URL → 401, wrong role → 403
+  ▼
+DispatcherServlet → controller → service proxy
+                                   @PreAuthorize: checked before the method → 403 (via @RestControllerAdvice)
+```
+
+- The **`SecurityContext`** holds the current `Authentication`, per thread, like the transaction (§5.6). `SecurityContextHolder.getContext().getAuthentication()` reads it anywhere. A controller simply declares an `Authentication` parameter.
+- The chain is stateless here: `SessionCreationPolicy.STATELESS`, no `HttpSession`, no cookie. Every request authenticates on its own.
+
+#### Logging in: `UserDetailsService` and `PasswordEncoder`
+
+```java
+// AuthController.login
+Authentication authentication = authenticationManager.authenticate(
+        UsernamePasswordAuthenticationToken.unauthenticated(request.email(), request.password()));
+return tokens.issue((MemberUserDetails) authentication.getPrincipal());
+```
+
+- `AuthenticationManager` → `DaoAuthenticationProvider` → `MemberUserDetailsService.loadUserByUsername(email)` loads the member as a `UserDetails` (login name, hash, authorities). The provider then checks the password with the `PasswordEncoder`. A wrong password or an unknown email both end as `BadCredentialsException` → **401 "Invalid email or password."**. The two cases also take the same time: for an unknown email the provider hashes a dummy password anyway. Otherwise the answer, or its timing, would tell which emails have an account. Registration still tells: an email that is taken gets a 409. Hiding that too takes a generic "check your inbox" answer and a confirmation email, plus rate limiting on both endpoints; this API keeps the 409.
+- **Passwords are stored as hashes, never as text.** `PasswordEncoderFactories.createDelegatingPasswordEncoder()` stores `{bcrypt}$2a$10$<22 chars of salt><hash>`:
+  - The prefix names the algorithm, so a later default (Argon2...) can hash new passwords while old hashes still match.
+  - The random salt makes two equal passwords hash differently.
+  - The cost (10 = 2^10 rounds) makes each guess slow.
+- **BCrypt reads only 72 bytes.** In Spring Security 7, `encode` rejects a longer password with an `IllegalArgumentException` (a 500 at registration), while `matches` quietly compares only the first 72 bytes. `RegisterRequest` limits the password with `@MaxBytes(72)`, a custom constraint (§5.3), because `@Size` counts characters and `ñ` is 2 bytes.
+- `register` always creates a MEMBER. Librarians are appointed (here, by the demo SQL), never self-registered.
+- A record's `toString` prints every component, and a request DTO ends up in logs. `RegisterRequest` and `LoginRequest` override it to hide the password.
+
+#### JWT: the token is the session
+
+A JWT is three base64url parts, `header.payload.signature`:
+
+```json
+{"alg": "HS256"}
+{"iss": "library", "sub": "1", "email": "ada@library.test", "roles": ["MEMBER"],
+ "iat": 1790762400, "exp": 1790766000}
+```
+
+- **Signed, not encrypted.** Anyone can read the claims (paste a token into jwt.io). Only the holder of the key can produce a valid signature, so the server trusts the claims without a database lookup. Never put a secret in a claim.
+- `JwtConfig` uses **HS256**: one shared secret (`library.security.jwt.secret`, at least 32 bytes) both signs and checks. That fits an API that issues its own tokens. With a separate identity provider (below), the API would hold only the provider's public keys (RS256) and have no encoder.
+- The decoder checks the signature, then `exp`/`nbf` (with 60 s of allowed clock skew, against the application's `Clock`), then `iss`. `TokenServiceTest` covers each failure: expired, tampered, signed with another key, another issuer.
+- **Stateless has a price.** A token stays valid until `exp`, whatever happens meanwhile (a role change, a "logout"). Hence the short lifetime (1 h). Real systems pair a short access token with a refresh token, or keep a deny-list. The alternative is **server sessions**: a `JSESSIONID` cookie and state on the server. Sessions are easy to revoke, but they need CSRF protection and shared storage once there is more than one server.
+- **The secret is configuration, not code.** It is not in `application.yml`:
+  - the dev profile has a dev-only value;
+  - the tests have theirs in `src/test/resources/config/application.yml`, which Boot reads on top of the main file;
+  - any other run must set `LIBRARY_SECURITY_JWT_SECRET` (relaxed binding maps it to `library.security.jwt.secret`).
+
+  Without it, `@Validated` stops the startup naming the key.
+
+#### The resource server: from token to `Authentication`
+
+```java
+.oauth2ResourceServer(resourceServer -> resourceServer
+        .jwt(jwt -> jwt.jwtAuthenticationConverter(jwtAuthenticationConverter)) ...)
+```
+
+The starter `spring-boot-starter-security-oauth2-resource-server` adds `BearerTokenAuthenticationFilter`. Our `JwtDecoder` bean replaces Boot's own decoder configuration, which would otherwise expect `spring.security.oauth2.resourceserver.jwt.issuer-uri`. The converter builds a `JwtAuthenticationToken`:
+- **name** = the `sub` claim (the member id; `CurrentMember.from(authentication)` reads it);
+- **authorities** = the `roles` claim with the prefix `ROLE_`. By default it would read `scope` and prefix `SCOPE_`.
+
+**Roles vs authorities.** An authority is any string the rules can check (`SCOPE_loans:write`, `ROLE_LIBRARIAN`). A role is an authority with the `ROLE_` prefix: `hasRole('LIBRARIAN')` checks for `ROLE_LIBRARIAN`, `hasAuthority('ROLE_LIBRARIAN')` is the same thing spelled out.
+
+#### URL rules and method security
+
+The URL rules in `SecurityConfig` are checked **top to bottom, first match wins**. Grouped here by effect (the code has the order):
+
+| Rule | Paths |
+|---|---|
+| `permitAll()` | `/api/auth/**`, `/api/info/**`, Swagger UI and `/v3/api-docs/**`, `/error` |
+| `authenticated()` | `GET /api/books/**`, `GET /api/authors/**`, `POST /api/loans` (borrow), `/api/members/me/**`, and anything not listed |
+| `hasRole("LIBRARIAN")` | other methods on books and authors, any other method on `/api/loans` (the list of everyone's loans), `/api/members/{id}`, `/api/audit-events` |
+
+`/api/info/**` also matches `/api/info` itself. A specific rule must come before a broader one: put `/api/members/**` above `/api/members/me` and members lose `/me`.
+
+URL rules see a path and a role, not data. "Only the loan's member" needs the loan, so it is **method security** (`@EnableMethodSecurity`) on the service:
+
+```java
+@PreAuthorize("hasRole('LIBRARIAN') or @loanAccess.isOwner(#id, authentication)")
+public LoanResponse returnLoan(Long id) { ... }
+```
+
+- A SpEL expression: `#id` is the parameter, `authentication` the current user, `@loanAccess` a bean by name. It runs in a proxy, like `@Transactional`, and has the same self-invocation limit (§5.6). It runs before the method and before its transaction: a refused return is not even audited.
+- `findById` uses the same check. **`@PostAuthorize`** (`returnObject.memberId() == ...`) would check the loaded loan without a second query. But then a missing loan is a 404 and someone else's a 403, and a member could probe which ids exist. With `@PreAuthorize` and `isOwner` false for missing loans, both are 403 (`LoanSecurityIT.memberCannotReadOthersLoans`). A librarian still gets the 404.
+- A borrow's member comes from the token. `CurrentMember.borrowerFor(memberId)` allows no id or your own id; a librarian may name anyone; a member naming someone else gets a 403, rather than having the field silently ignored.
+- **Secure the service, not only the URL.** A method rule holds whoever calls the method: another controller, a scheduled job (§5.9) or a test. Here only `findById` and `returnLoan` have one. `findAll` (any member's loans) relies on the URL rule, and "borrow for whom" is checked in `LoanController`. A new caller of those two service methods gets no check: give them a `@PreAuthorize` before adding one.
+
+#### 401 and 403 as ProblemDetail
+
+The filters reject requests before Spring MVC, so `@RestControllerAdvice` never sees those exceptions by itself. `SecurityProblemHandler` is both the `AuthenticationEntryPoint` (401) and the `AccessDeniedHandler` (403). It hands the exception to Spring MVC's `HandlerExceptionResolver`, and `GlobalExceptionHandler` writes it. Method security throws inside the controller call, straight to the same handlers.
+
+| Case | Status | `WWW-Authenticate` | `detail` |
+|---|---|---|---|
+| No token | 401 | `Bearer` | `Authentication is required: send a bearer token.` |
+| Bad, expired or malformed token (`Bearer a b`) | 401 | `Bearer error="invalid_token"` (RFC 6750) | `The bearer token is invalid or has expired.` |
+| Wrong email or password | 401 | `Bearer` | `Invalid email or password.` |
+| Not allowed | 403 | | `You are not allowed to do this.` |
+
+The details stay generic on purpose: the decoder's own message says which check failed. Before this chapter, the catch-all `@ExceptionHandler(Exception.class)` would have turned an `AccessDeniedException` from `@PreAuthorize` into a 500 (`GlobalExceptionHandlerTest` pins all four). The catch-all now also honours an exception class annotated with `@ResponseStatus`, which it used to swallow.
+
+#### CSRF and CORS
+
+- **CSRF** (cross-site request forgery): a malicious page makes the victim's browser send a request to your site, and the browser attaches the site's cookies. Spring Security enables CSRF protection by default for that reason. This API uses no cookies: the client adds the bearer header itself, and a foreign page cannot. So `csrf.disable()` is correct here, and it is wrong for a cookie session.
+- **CORS** (cross-origin resource sharing): a browser page on `http://localhost:4200` (the Angular dev server) calling `http://localhost:8080` is cross-origin, and the browser blocks reading the response unless the server allows it.
+  - Before a non-simple request (a JSON body, an `Authorization` header), the browser sends a **preflight** `OPTIONS` with `Origin`, `Access-Control-Request-Method` and `-Headers`, and no token.
+  - `CorsFilter` answers it first in the chain, from the `CorsConfigurationSource` bean: allowed origins (`library.security.cors.allowed-origins`), methods, headers, exposed headers (`Location`), and how long to cache the answer. See `CorsTest`.
+  - CORS protects users in browsers only. curl, Postman and other servers ignore it; it is not access control.
+- **Consuming this API from Angular.** Two options:
+  - The dev server's **proxy** (`proxy.conf.json`: `/api` → `http://localhost:8080`): the browser sees one origin, so no CORS at all. The same setup works in production behind one reverse proxy.
+  - Calling `:8080` directly, which needs the CORS configuration above.
+
+  Either way, an `HttpInterceptor` adds `Authorization: Bearer <token>` to each request. Where to keep the token matters: `localStorage` is readable by any script on the page (XSS); memory is lost on reload. Many apps keep it in memory and refresh it.
+
+#### Identity providers
+
+Issuing tokens yourself means owning password storage, resets, lockout, MFA and key rotation. Real systems usually delegate that to an **identity provider** (Keycloak, Auth0, Okta, Entra ID) speaking OpenID Connect:
+- The user logs in there. The API only validates the provider's tokens: `spring.security.oauth2.resourceserver.jwt.issuer-uri=https://idp.example/realms/library`, which also fetches the public keys.
+- `TokenService`, `AuthController.login` and the password column disappear; the resource-server half of this chapter stays as it is.
+
+#### Testing security
+
+| Tool | What it does | Used in |
+|---|---|---|
+| `@WithMockUser(roles = "LIBRARIAN")` | Puts a user in the `SecurityContext` of the test thread. No token, no decoder | `BookControllerTest`, `BookControllerIT`, `LoanControllerIT` |
+| `jwt()` request post-processor (`TestUsers`) | Attaches an already-authenticated JWT to one request, so it works from any thread | `LoanConcurrencyIT`, `MemberControllerIT` |
+| A real token (`TokenService`, or `/api/auth/login`) | The whole chain, decoder included | `JwtAuthIT`, `LoanSecurityIT`, `AuthControllerIT` |
+
+- A `@WebMvcTest` slice loads controllers, not `@Configuration` classes, so without `@Import({SecurityConfig.class, JwtConfig.class})` it runs Boot's default security (HTTP Basic, everything authenticated) instead of ours.
+- `@WithMockUser` lives in a thread-local, so threads started by the test do not see it. `LoanConcurrencyIT` sends `jwt()` with each request instead.
+
+**Gotchas**
+- **Rule order.** The first matching URL rule wins. A broad rule above a narrow one silently shadows it.
+- **A rule on `GET` alone misses `HEAD`.** Spring MVC answers `HEAD` with the `GET` handler, so `requestMatchers(HttpMethod.GET, "/api/loans").hasRole(...)` let a member run the librarian-only list with `HEAD`, falling through to `authenticated()`. Name the methods that are allowed (`POST`) and lock the rest (`LoanSecurityIT.memberCannotReadOthersLoans`).
+- **An unlisted endpoint.** `anyRequest().authenticated()` makes a forgotten endpoint available to any logged-in user. `denyAll()` is safer, but turns a typo in a URL into a 403 instead of a 404.
+- **401 vs 403.** 401 means "who are you?" (send credentials); 403 means "I know, and no". Browsers and clients react differently to each.
+- **A token on a public endpoint is still checked.** Send a broken token to `/api/info` and you get a 401 (`JwtAuthIT.aBadTokenIsRejectedEvenOnAPublicEndpoint`).
+- **`@PreAuthorize` needs `@EnableMethodSecurity`.** Without it the annotation is ignored, silently, like `@Transactional` on a `private` method.
+- **A run without a web server.** `HttpSecurity` only exists in a servlet application, so a `SecurityFilterChain` bean breaks a context started with `WebApplicationType.NONE` (a batch job, `@SpringBootTest(webEnvironment = NONE)`). `SecurityConfig` marks it `@ConditionalOnWebApplication(type = SERVLET)`; method security still applies (`DemoDataIT.aRunWithoutTheDevProfileStillStartsOnThisDatabase`).
+- **Roles in the token go stale.** Demote a librarian and their token says LIBRARIAN until it expires.
+- **Never log tokens or passwords.** A token in a log is a session anyone can reuse until it expires.
 
 ### 5.8 Testing
 
@@ -1716,6 +1904,7 @@ _Written in Phase 13._
 - Spring Boot: [reference docs](https://docs.spring.io/spring-boot/index.html), [start.spring.io](https://start.spring.io)
 - Spring Framework: [reference docs](https://docs.spring.io/spring-framework/reference/)
 - Persistence: [Spring Data JPA reference](https://docs.spring.io/spring-data/jpa/reference/) (query method keywords), [Hibernate ORM documentation](https://hibernate.org/orm/documentation/), [Flyway documentation](https://documentation.red-gate.com/flyway), [Testcontainers for Java](https://java.testcontainers.org/)
+- Security: [Spring Security reference](https://docs.spring.io/spring-security/reference/) (servlet architecture, OAuth2 resource server), [RFC 7519 (JWT)](https://www.rfc-editor.org/rfc/rfc7519), [RFC 6750 (bearer tokens)](https://www.rfc-editor.org/rfc/rfc6750), [OWASP Password Storage Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html)
 
 ---
 
@@ -1828,6 +2017,17 @@ A map for orientation, not a claim that the pieces are identical. It grows with 
 | `BeginTransaction(IsolationLevel.Serializable)` | `@Transactional(isolation = Isolation.SERIALIZABLE)` | |
 | `[ConcurrencyCheck]`, `[Timestamp]` / `IsRowVersion()` | `@Version` | SQL Server bumps a `rowversion` itself; Hibernate bumps `@Version` in its own UPDATE |
 | `DbUpdateConcurrencyException` | `ObjectOptimisticLockingFailureException` | Spring's translation of Hibernate's `StaleObjectStateException` |
+| Middleware pipeline (`UseAuthentication`, `UseAuthorization`) | The `SecurityFilterChain` (servlet filters before the `DispatcherServlet`) | Order matters in both |
+| `AddAuthentication().AddJwtBearer(...)` | `.oauth2ResourceServer(rs -> rs.jwt(...))` + a `JwtDecoder` | With an identity provider both take just the authority / `issuer-uri` |
+| `[Authorize]`, `[Authorize(Roles = "Librarian")]`, `[AllowAnonymous]` | URL rules (`authenticated()`, `hasRole(...)`, `permitAll()`) or `@PreAuthorize("hasRole('LIBRARIAN')")` | Spring prefers central URL rules; attributes are the method-security flavour |
+| Resource-based authorization (`IAuthorizationService` + a handler) | `@PreAuthorize("... @loanAccess.isOwner(#id, authentication)")` | A bean called from a SpEL expression |
+| `ClaimsPrincipal` (`HttpContext.User`) | `Authentication` in the `SecurityContext` | `User.FindFirst("sub")` ↔ `authentication.getName()` |
+| Role claims (`ClaimTypes.Role`) | Authorities with the `ROLE_` prefix | `hasRole('X')` checks `ROLE_X` |
+| ASP.NET Core Identity `PasswordHasher` (PBKDF2) | `PasswordEncoder` (delegating, BCrypt by default) | Both store the algorithm marker with the hash |
+| `JwtSecurityTokenHandler` / `JsonWebTokenHandler` | `JwtEncoder` / `JwtDecoder` (Nimbus) | |
+| `AddCors` + `UseCors` | `CorsConfigurationSource` bean + `.cors(...)` in the chain | |
+| Antiforgery tokens | Spring Security's CSRF protection (on by default) | Off for a bearer-token API in both |
+| User secrets / environment variables for signing keys | Profile-specific YAML for dev, environment variables elsewhere | `LIBRARY_SECURITY_JWT_SECRET` ↔ `library.security.jwt.secret` |
 
 **LINQ ↔ Streams**
 
@@ -1878,5 +2078,8 @@ A map for orientation, not a claim that the pieces are identical. It grows with 
 - **Checked exceptions do not roll back.** A `@Transactional` method that throws `IOException` commits what it wrote. Only unchecked exceptions roll back, unless you add `rollbackFor` (§5.6).
 - **`@Transactional` works only through the proxy.** A call to a method of the same class, or to a `private` method, runs without its annotation, and nothing tells you (§5.6).
 - **Catching an exception does not save the transaction.** If it came out of a method that joined your transaction, the commit fails with `UnexpectedRollbackException` (§5.6).
+- **`hasRole('ADMIN')` checks for `ROLE_ADMIN`.** A token or `UserDetails` whose authority is plain `ADMIN` never matches it. Use `hasAuthority` for the exact string (§5.7).
+- **Security is not the MVC pipeline.** The filters run before Spring MVC, so `@RestControllerAdvice` never sees a 401 or 403 from them unless you route it there, as `SecurityProblemHandler` does (§5.7).
+- **A record's `toString` prints every field.** A request record with a password ends up in a log with it. Override `toString` (§5.7).
 - **Pages start at 0.** `?page=1` is the second page.
 - **The schema is not generated from the classes.** Flyway runs your SQL; Hibernate only validates. Adding a field to an entity means writing a migration too, or the app does not start.

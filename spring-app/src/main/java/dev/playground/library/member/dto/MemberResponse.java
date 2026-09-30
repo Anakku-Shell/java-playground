@@ -1,4 +1,9 @@
 package dev.playground.library.member.dto;
 
-/** What the API returns for a member. The role arrives with security (§5.7). Guide: §5.5. */
-public record MemberResponse(Long id, String email, String fullName) {}
+import dev.playground.library.member.Role;
+
+/**
+ * What the API returns for a member: never the password hash. Guide: §5.5 Advanced JPA, §5.7
+ * Security.
+ */
+public record MemberResponse(Long id, String email, String fullName, Role role) {}

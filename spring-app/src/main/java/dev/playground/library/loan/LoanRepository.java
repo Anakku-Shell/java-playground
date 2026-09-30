@@ -15,6 +15,9 @@ import org.springframework.data.jpa.repository.Query;
  */
 public interface LoanRepository extends JpaRepository<Loan, Long>, JpaSpecificationExecutor<Loan> {
 
+    /** For {@code LoanAccess} (§5.7): is this loan the member's? */
+    boolean existsByIdAndMemberId(Long id, Long memberId);
+
     // "BookId" walks the relation to the id, which is the loans.book_id column itself: no join.
     long countByBookIdAndReturnedAtIsNull(Long bookId);
 

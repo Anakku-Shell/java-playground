@@ -1,57 +1,79 @@
 ### Guide §5.3 Validation & errors. VS Code REST Client syntax: click "Send Request" above each request.
-### The app must be running on :8080 without the dev profile, on an empty database (the ids assume
-### it). Since §5.4 the data survives restarts: reset it with docker compose -f spring-app/compose.yaml down -v
+### Written before security (§5.7). Since then only the dev profile has users (and a JWT secret):
+###   ./mvnw -pl spring-app spring-boot:run -Dspring-boot.run.profiles=dev
+### and send the login request first. The demo data is then there too, so ids and counts differ from
+### the comments, which describe this chapter's empty database.
+### (Originally: the app running on :8080 without the dev profile, on an empty database (the ids assume
+### it). Since §5.4 the data survives restarts: reset it with docker compose -f spring-app/compose.yaml down -v.)
 ### Every error response is a ProblemDetail: Content-Type application/problem+json.
 
 @host = http://localhost:8080
 
+### Since §5.7 every request needs a token: log in as the demo librarian first (200). The others
+### send it in their Authorization header
+# @name login
+POST {{host}}/api/auth/login
+Content-Type: application/json
+
+{"email": "librarian@library.test", "password": "demo-password"}
+
 ### Create a book with a hyphenated ISBN-10 (201). The response shows it stored as ISBN-13: 9780441013593.
 POST {{host}}/api/books
+Authorization: Bearer {{login.response.body.accessToken}}
 Content-Type: application/json
 
 {"isbn": "0-441-01359-7", "title": "Dune", "publishedYear": 1965, "totalCopies": 3}
 
 ### The same book as ISBN-13 (409, detail "A book with ISBN 9780441013593 already exists")
 POST {{host}}/api/books
+Authorization: Bearer {{login.response.body.accessToken}}
 Content-Type: application/json
 
 {"isbn": "9780441013593", "title": "Dune (again)", "publishedYear": 1965, "totalCopies": 1}
 
 ### Several invalid fields at once (400, errors: isbn, title, totalCopies)
 POST {{host}}/api/books
+Authorization: Bearer {{login.response.body.accessToken}}
 Content-Type: application/json
 
 {"isbn": "9780441013594", "title": "", "totalCopies": -1}
 
 ### totalCopies missing (400, detail "Failed to read request", no errors map: Jackson fails before validation)
 POST {{host}}/api/books
+Authorization: Bearer {{login.response.body.accessToken}}
 Content-Type: application/json
 
 {"isbn": "9780141439518", "title": "Emma"}
 
 ### Invalid body on PUT (400, errors.title). Method validation path, same shape.
 PUT {{host}}/api/books/1
+Authorization: Bearer {{login.response.body.accessToken}}
 Content-Type: application/json
 
 {"isbn": "9780441013593", "title": " ", "totalCopies": 3}
 
 ### Author with a blank name and a future birth year (400, errors: birthYear, name)
 POST {{host}}/api/authors
+Authorization: Bearer {{login.response.body.accessToken}}
 Content-Type: application/json
 
 {"name": "", "birthYear": 3000}
 
 ### A non-positive id (400, errors.id)
 GET {{host}}/api/authors/0
+Authorization: Bearer {{login.response.body.accessToken}}
 
 ### An id that does not exist (404, detail "Book 999 not found")
 GET {{host}}/api/books/999
+Authorization: Bearer {{login.response.body.accessToken}}
 
 ### Malformed JSON (400, detail "Failed to read request")
 POST {{host}}/api/books
+Authorization: Bearer {{login.response.body.accessToken}}
 Content-Type: application/json
 
 {"isbn": "9780441013593",
 
 ### A path with no endpoint (404, detail "No static resource api/nothing-here.")
 GET {{host}}/api/nothing-here
+Authorization: Bearer {{login.response.body.accessToken}}

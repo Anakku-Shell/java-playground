@@ -28,11 +28,12 @@ concept's code updates its guide section.
 ```bash
 ./mvnw verify                          # compile + unit tests + ITs + Spotless check
 ./mvnw spotless:apply                  # format the code (run before committing)
-./mvnw -pl spring-app spring-boot:run  # run the API on :8080
+./mvnw -pl spring-app spring-boot:run -Dspring-boot.run.profiles=dev  # run the API on :8080 with demo data and users
 ./mvnw -pl java-core test -Dtest=RecordsTest   # one test class
 ```
 
-- Docker Desktop must be running for `spring-boot:run` (it starts `spring-app/compose.yaml`) and for the `*IT` tests. `-Dspring-boot.run.profiles=dev` adds the demo data (`db/demo`) and SQL logging.
+- Docker Desktop must be running for `spring-boot:run` (it starts `spring-app/compose.yaml`) and for the `*IT` tests. The dev profile adds the demo data and users (`db/demo`, password `demo-password`), SQL logging and a dev-only JWT secret; without it the app needs `LIBRARY_SECURITY_JWT_SECRET`.
+- Endpoints need a bearer token from `POST /api/auth/login` (§5.7). Tests: `@WithMockUser` or `TestUsers` (`jwt()`) when security is not the subject.
 - If `java` is not on PATH, set `JAVA_HOME` to the Temurin 25 install folder.
 
 ## Git

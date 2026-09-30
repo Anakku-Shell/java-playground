@@ -6,6 +6,7 @@ import dev.playground.library.TestcontainersConfiguration;
 import dev.playground.library.book.Book;
 import dev.playground.library.config.JpaAuditingConfig;
 import dev.playground.library.member.Member;
+import dev.playground.library.member.Role;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.util.List;
@@ -50,8 +51,8 @@ class LoanRepositoryIT {
         dune = em.persist(new Book("9780441013593", "Dune", 1965, 3));
         emma = em.persist(new Book("9780141439587", "Emma", 1815, 2));
         cosmos = em.persist(new Book("9780345539434", "Cosmos", 1980, 2));
-        ada = em.persist(new Member("ada@library.test", "Ada Lovelace"));
-        alan = em.persist(new Member("alan@library.test", "Alan Turing"));
+        ada = em.persist(new Member("ada@library.test", "Ada Lovelace", null, Role.MEMBER));
+        alan = em.persist(new Member("alan@library.test", "Alan Turing", null, Role.MEMBER));
 
         em.persist(new Loan(dune, ada, T, DUE));
         em.persist(new Loan(dune, alan, T, DUE));

@@ -6,7 +6,6 @@ import dev.playground.library.book.BookRepository;
 import dev.playground.library.common.ConflictException;
 import dev.playground.library.common.NotFoundException;
 import dev.playground.library.config.LibraryProperties;
-import dev.playground.library.loan.dto.CreateLoanRequest;
 import dev.playground.library.loan.dto.LoanResponse;
 import dev.playground.library.member.Member;
 import dev.playground.library.member.MemberRepository;
@@ -17,6 +16,7 @@ import java.time.temporal.ChronoUnit;
 import java.util.List;
 import org.springframework.data.domain.Sort;
 import org.springframework.data.jpa.domain.Specification;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -26,7 +26,7 @@ import org.springframework.transaction.annotation.Transactional;
  * {@code library.loans.duration-days} after today, and a loan is returned once. Each broken rule is
  * a {@code ConflictException} (409). Reads run in the class-level read-only transaction; borrow and
  * return are read-write, and their races are closed with optimistic locking. Guide: §5.5 Advanced
- * JPA, §5.6 Transactions.
+ * JPA, §5.6 Transactions, §5.7 Security (who may read and return a loan).
  */
 @Service
 @Transactional(readOnly = true)
@@ -63,15 +63,14 @@ public class LoanService {
      * loan is rolled back. {@code LoanConcurrencyIT} forces these races.
      */
     @Transactional
-    public LoanResponse borrow(CreateLoanRequest request) {
+    public LoanResponse borrow(Long bookId, Long memberId) {
         // First, and in a transaction of its own (see AuditService): a rejected borrow is audited too.
         // The cost: this transaction already holds a connection, and the audit takes a second one.
-        audit.record("BORROW_REQUESTED", "book " + request.bookId() + ", member " + request.memberId());
+        audit.record("BORROW_REQUESTED", "book " + bookId + ", member " + memberId);
         // Both read with a version bump: see the methods, and the races described above.
-        Book book = books.findWithVersionIncrementById(request.bookId())
-                .orElseThrow(() -> new NotFoundException("Book", request.bookId()));
-        Member member = members.findWithVersionIncrementById(request.memberId())
-                .orElseThrow(() -> new NotFoundException("Member", request.memberId()));
+        Book book = books.findWithVersionIncrementById(bookId).orElseThrow(() -> new NotFoundException("Book", bookId));
+        Member member = members.findWithVersionIncrementById(memberId)
+                .orElseThrow(() -> new NotFoundException("Member", memberId));
 
         if (loans.countByMemberIdAndReturnedAtIsNull(member.getId()) >= rules.maxActive()) {
             throw new ConflictException(
@@ -89,7 +88,11 @@ public class LoanService {
     /**
      * Same race as borrow: two returns at once both see an active loan. {@code Loan.version} makes
      * the second UPDATE match no row, so it fails (409) and the first {@code returnedAt} stays.
+     *
+     * <p>Only the loan's member or a librarian (§5.7). The check runs before the method, and before
+     * its transaction: a refused return is not even audited.
      */
+    @PreAuthorize("hasRole('LIBRARIAN') or @loanAccess.isOwner(#id, authentication)")
     @Transactional
     public LoanResponse returnLoan(Long id) {
         audit.record("RETURN_REQUESTED", "loan " + id);
@@ -101,6 +104,12 @@ public class LoanService {
         return LoanMapper.toResponse(loan);
     }
 
+    /**
+     * One loan, for its member or a librarian (§5.7), checked like {@code returnLoan}. Not with
+     * {@code @PostAuthorize} on the returned loan: a missing loan would then be a 404 and someone
+     * else's a 403, which tells a member which loan ids exist.
+     */
+    @PreAuthorize("hasRole('LIBRARIAN') or @loanAccess.isOwner(#id, authentication)")
     public LoanResponse findById(Long id) {
         return LoanMapper.toResponse(getOrThrow(id));
     }

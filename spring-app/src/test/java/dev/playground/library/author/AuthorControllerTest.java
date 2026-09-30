@@ -14,15 +14,20 @@ import dev.playground.library.author.dto.CreateAuthorRequest;
 import dev.playground.library.author.dto.UpdateAuthorRequest;
 import dev.playground.library.common.NotFoundException;
 import dev.playground.library.common.PageResponse;
+import dev.playground.library.security.JwtConfig;
+import dev.playground.library.security.SecurityConfig;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
+import org.springframework.context.annotation.Import;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
+import org.springframework.security.test.context.support.WithAnonymousUser;
+import org.springframework.security.test.context.support.WithMockUser;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.assertj.MockMvcTester;
 
@@ -34,6 +39,10 @@ import org.springframework.test.web.servlet.assertj.MockMvcTester;
  * into the context in place of the real bean.
  */
 @WebMvcTest(AuthorController.class)
+// The slice loads controllers, not @Configuration classes: the real security rules are imported, and
+// every test runs as a librarian unless it says otherwise (§5.7).
+@Import({SecurityConfig.class, JwtConfig.class})
+@WithMockUser(roles = "LIBRARIAN")
 class AuthorControllerTest {
 
     @Autowired
@@ -258,5 +267,24 @@ class AuthorControllerTest {
                 .extractingPath("$.errors")
                 .isEqualTo(Map.of("name", List.of("must not be blank")));
         verifyNoInteractions(service);
+    }
+
+    @Test
+    @WithMockUser(roles = "MEMBER")
+    void aMemberCannotCreateAnAuthor() {
+        assertThat(mvc.post()
+                        .uri("/api/authors")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"name": "Frank Herbert"}
+                                """))
+                .hasStatus(HttpStatus.FORBIDDEN);
+        verifyNoInteractions(service);
+    }
+
+    @Test
+    @WithAnonymousUser
+    void withoutATokenAuthorsAre401() {
+        assertThat(mvc.get().uri("/api/authors")).hasStatus(HttpStatus.UNAUTHORIZED);
     }
 }

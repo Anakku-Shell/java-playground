@@ -3,6 +3,8 @@ package dev.playground.library.info;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import dev.playground.library.config.LibraryProperties;
+import dev.playground.library.security.JwtConfig;
+import dev.playground.library.security.SecurityConfig;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -23,7 +25,8 @@ import org.springframework.test.web.servlet.assertj.MockMvcTester;
  * the slice does not provide fails the context with "No qualifying bean".
  */
 @WebMvcTest(InfoController.class)
-@Import({FormalGreeter.class, CasualGreeter.class})
+// The security rules too (§5.7): /api/info is public, so these requests carry no user at all.
+@Import({FormalGreeter.class, CasualGreeter.class, SecurityConfig.class, JwtConfig.class})
 @EnableConfigurationProperties(LibraryProperties.class)
 class InfoControllerTest {
 

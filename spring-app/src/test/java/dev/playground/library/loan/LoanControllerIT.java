@@ -9,6 +9,7 @@ import dev.playground.library.book.Book;
 import dev.playground.library.book.BookRepository;
 import dev.playground.library.member.Member;
 import dev.playground.library.member.MemberRepository;
+import dev.playground.library.member.Role;
 import java.io.UnsupportedEncodingException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -19,6 +20,7 @@ import org.springframework.context.annotation.Import;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.security.test.context.support.WithMockUser;
 import org.springframework.test.web.servlet.assertj.MockMvcTester;
 import org.springframework.test.web.servlet.assertj.MvcTestResult;
 
@@ -29,6 +31,9 @@ import org.springframework.test.web.servlet.assertj.MvcTestResult;
 @SpringBootTest
 @AutoConfigureMockMvc
 @Import(TestcontainersConfiguration.class)
+// Security is not the subject here (LoanSecurityIT is): a librarian, who may borrow on any member's
+// behalf. The name is the member id CurrentMember reads; 999 is no member.
+@WithMockUser(username = "999", roles = "LIBRARIAN")
 class LoanControllerIT {
 
     @Autowired
@@ -51,8 +56,8 @@ class LoanControllerIT {
     void aBookAndTwoMembers() {
         TestTables.truncateAll(jdbc);
         dune = books.save(new Book("9780441013593", "Dune", 1965, 2));
-        ada = members.save(new Member("ada@library.test", "Ada Lovelace"));
-        alan = members.save(new Member("alan@library.test", "Alan Turing"));
+        ada = members.save(new Member("ada@library.test", "Ada Lovelace", null, Role.MEMBER));
+        alan = members.save(new Member("alan@library.test", "Alan Turing", null, Role.MEMBER));
     }
 
     private MvcTestResult borrow(Book book, Member member) {

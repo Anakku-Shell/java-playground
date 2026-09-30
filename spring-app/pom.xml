@@ -60,6 +60,17 @@
             <artifactId>flyway-database-postgresql</artifactId>
         </dependency>
 
+        <!-- Spring Security (the filter chain, authentication, method security) and the OAuth2
+             resource server: it validates the JWT bearer token on each request. Guide: §5.7. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-security</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-security-oauth2-resource-server</artifactId>
+        </dependency>
+
         <!-- The JDBC driver: only needed at runtime, the code never imports it. -->
         <dependency>
             <groupId>org.postgresql</groupId>
@@ -99,6 +110,19 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-flyway-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- @WithMockUser, jwt() and the other Spring Security test helpers (start.spring.io pairs
+             one test starter with each security starter). -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-security-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-security-oauth2-resource-server-test</artifactId>
             <scope>test</scope>
         </dependency>
 

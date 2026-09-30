@@ -20,3 +20,7 @@ logging:
     # Every SQL statement Hibernate sends, and (TRACE) the values bound to its ? parameters.
     org.hibernate.SQL: DEBUG
     org.hibernate.orm.jdbc.bind: TRACE
+
+# Signs and checks the JWTs (§5.7). A dev-only value, committed so the dev profile runs as is. Any
+# other environment sets its own secret (LIBRARY_SECURITY_JWT_SECRET) and never commits it.
+library.security.jwt.secret: dev-only-secret-change-me-0123456789abcdef

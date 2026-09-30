@@ -3,6 +3,7 @@ package dev.playground.library.book;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.BDDMockito.given;
 import static org.mockito.BDDMockito.willThrow;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 
@@ -12,21 +13,30 @@ import dev.playground.library.book.dto.UpdateBookRequest;
 import dev.playground.library.common.ConflictException;
 import dev.playground.library.common.NotFoundException;
 import dev.playground.library.common.PageResponse;
+import dev.playground.library.security.JwtConfig;
+import dev.playground.library.security.SecurityConfig;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
+import org.springframework.context.annotation.Import;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
+import org.springframework.security.test.context.support.WithAnonymousUser;
+import org.springframework.security.test.context.support.WithMockUser;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.assertj.MockMvcTester;
 
 /** The HTTP contract of {@link BookController}, with the service mocked. Guide: §5.2 REST API. */
 @WebMvcTest(BookController.class)
+// The slice loads controllers, not @Configuration classes: the real security rules are imported, and
+// every test runs as a librarian unless it says otherwise (§5.7).
+@Import({SecurityConfig.class, JwtConfig.class})
+@WithMockUser(roles = "LIBRARIAN")
 class BookControllerTest {
 
     private static final BookResponse DUNE = new BookResponse(1L, "9780441013593", "Dune", 1965, 3, 3, List.of());
@@ -347,5 +357,34 @@ class BookControllerTest {
                         .content("Dune"))
                 .hasStatus(HttpStatus.UNSUPPORTED_MEDIA_TYPE);
         verifyNoInteractions(service);
+    }
+
+    // Security rules (§5.7), checked in the slice: the real SecurityFilterChain runs in front of the
+    // controller, and @WithMockUser puts a user in the SecurityContext without any token.
+
+    @Test
+    @WithAnonymousUser
+    void withoutATokenTheCatalogueIs401() {
+        assertThat(mvc.get().uri("/api/books"))
+                .hasStatus(HttpStatus.UNAUTHORIZED)
+                .bodyJson()
+                .extractingPath("$.detail")
+                .isEqualTo("Authentication is required: send a bearer token.");
+        verifyNoInteractions(service);
+    }
+
+    @Test
+    @WithMockUser(roles = "MEMBER")
+    void aMemberReadsTheCatalogueButCannotChangeIt() {
+        given(service.findById(1L)).willReturn(DUNE);
+
+        assertThat(mvc.get().uri("/api/books/1")).hasStatusOk();
+        assertThat(mvc.delete().uri("/api/books/1"))
+                .hasStatus(HttpStatus.FORBIDDEN)
+                .bodyJson()
+                .extractingPath("$.detail")
+                .isEqualTo("You are not allowed to do this.");
+        // The rule stopped the request before the controller: nothing was deleted.
+        verify(service, never()).delete(1L);
     }
 }

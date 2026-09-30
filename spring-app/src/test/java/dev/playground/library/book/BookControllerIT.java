@@ -18,6 +18,7 @@ import org.springframework.context.annotation.Import;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.security.test.context.support.WithMockUser;
 import org.springframework.test.web.servlet.assertj.MockMvcTester;
 import org.springframework.test.web.servlet.assertj.MvcTestResult;
 
@@ -29,6 +30,8 @@ import org.springframework.test.web.servlet.assertj.MvcTestResult;
 @SpringBootTest
 @AutoConfigureMockMvc
 @Import(TestcontainersConfiguration.class)
+// Security is not the subject here (§5.7 has its own tests): every request runs as a librarian.
+@WithMockUser(roles = "LIBRARIAN")
 class BookControllerIT {
 
     @Autowired

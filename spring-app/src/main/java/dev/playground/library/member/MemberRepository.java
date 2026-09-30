@@ -10,6 +10,9 @@ public interface MemberRepository extends JpaRepository<Member, Long> {
 
     boolean existsByEmail(String email);
 
+    /** For login (§5.7): {@code MemberUserDetailsService} looks members up by email. */
+    Optional<Member> findByEmail(String email);
+
     /**
      * The member for a borrow (§5.6): bumps the member's version at commit, like
      * {@code BookRepository.findWithVersionIncrementById} does for the book. The book's version

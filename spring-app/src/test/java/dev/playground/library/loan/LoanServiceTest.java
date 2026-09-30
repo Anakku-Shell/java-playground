@@ -13,10 +13,10 @@ import dev.playground.library.book.BookRepository;
 import dev.playground.library.common.ConflictException;
 import dev.playground.library.common.NotFoundException;
 import dev.playground.library.config.LibraryProperties;
-import dev.playground.library.loan.dto.CreateLoanRequest;
 import dev.playground.library.loan.dto.LoanResponse;
 import dev.playground.library.member.Member;
 import dev.playground.library.member.MemberRepository;
+import dev.playground.library.member.Role;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.LocalDate;
@@ -62,7 +62,7 @@ class LoanServiceTest {
         service = new LoanService(loans, books, members, properties, Clock.fixed(NOW, ZoneOffset.UTC), audit);
 
         dune = withId(new Book("9780441013593", "Dune", 1965, 2), 1L);
-        ada = withId(new Member("ada@library.test", "Ada Lovelace"), 7L);
+        ada = withId(new Member("ada@library.test", "Ada Lovelace", null, Role.MEMBER), 7L);
     }
 
     private static <T> T withId(T entity, Long id) {
@@ -80,7 +80,7 @@ class LoanServiceTest {
         bookAndMemberExist();
         given(loans.save(any(Loan.class))).willAnswer(invocation -> withId(invocation.getArgument(0), 5L));
 
-        LoanResponse loan = service.borrow(new CreateLoanRequest(1L, 7L));
+        LoanResponse loan = service.borrow(1L, 7L);
 
         assertThat(loan).isEqualTo(new LoanResponse(5L, 1L, "Dune", 7L, NOW, LocalDate.of(2026, 10, 14), null));
     }
@@ -95,8 +95,7 @@ class LoanServiceTest {
         bookAndMemberExist();
         given(loans.save(any(Loan.class))).willAnswer(invocation -> withId(invocation.getArgument(0), 5L));
 
-        assertThat(service.borrow(new CreateLoanRequest(1L, 7L)).loanedAt())
-                .isEqualTo(Instant.parse("2026-09-30T10:00:00.123456Z"));
+        assertThat(service.borrow(1L, 7L).loanedAt()).isEqualTo(Instant.parse("2026-09-30T10:00:00.123456Z"));
     }
 
     @Test
@@ -106,7 +105,7 @@ class LoanServiceTest {
         given(loans.countByMemberIdAndReturnedAtIsNull(7L)).willReturn(2L); // limit 3
         given(loans.save(any(Loan.class))).willAnswer(invocation -> withId(invocation.getArgument(0), 5L));
 
-        assertThat(service.borrow(new CreateLoanRequest(1L, 7L)).id()).isEqualTo(5L);
+        assertThat(service.borrow(1L, 7L).id()).isEqualTo(5L);
     }
 
     @Test
@@ -114,7 +113,7 @@ class LoanServiceTest {
         bookAndMemberExist();
         given(loans.countByBookIdAndReturnedAtIsNull(1L)).willReturn(2L); // both copies are out
 
-        assertThatThrownBy(() -> service.borrow(new CreateLoanRequest(1L, 7L)))
+        assertThatThrownBy(() -> service.borrow(1L, 7L))
                 .isInstanceOf(ConflictException.class)
                 .hasMessage("Book 1 has no available copies");
         then(loans).should(never()).save(any());
@@ -125,7 +124,7 @@ class LoanServiceTest {
         bookAndMemberExist();
         given(loans.countByMemberIdAndReturnedAtIsNull(7L)).willReturn(3L); // library.loans.max-active
 
-        assertThatThrownBy(() -> service.borrow(new CreateLoanRequest(1L, 7L)))
+        assertThatThrownBy(() -> service.borrow(1L, 7L))
                 .isInstanceOf(ConflictException.class)
                 .hasMessage("Member 7 already has 3 active loans");
         then(loans).should(never()).save(any());
@@ -134,13 +133,13 @@ class LoanServiceTest {
     @Test
     void unknownBookOrMemberIsNotFound() {
         given(books.findWithVersionIncrementById(1L)).willReturn(Optional.empty());
-        assertThatThrownBy(() -> service.borrow(new CreateLoanRequest(1L, 7L)))
+        assertThatThrownBy(() -> service.borrow(1L, 7L))
                 .isInstanceOf(NotFoundException.class)
                 .hasMessage("Book 1 not found");
 
         given(books.findWithVersionIncrementById(1L)).willReturn(Optional.of(dune));
         given(members.findWithVersionIncrementById(7L)).willReturn(Optional.empty());
-        assertThatThrownBy(() -> service.borrow(new CreateLoanRequest(1L, 7L)))
+        assertThatThrownBy(() -> service.borrow(1L, 7L))
                 .isInstanceOf(NotFoundException.class)
                 .hasMessage("Member 7 not found");
     }
@@ -176,7 +175,7 @@ class LoanServiceTest {
         given(books.findWithVersionIncrementById(1L)).willReturn(Optional.empty());
         given(loans.findById(5L)).willReturn(Optional.empty());
 
-        assertThatThrownBy(() -> service.borrow(new CreateLoanRequest(1L, 7L))).isInstanceOf(NotFoundException.class);
+        assertThatThrownBy(() -> service.borrow(1L, 7L)).isInstanceOf(NotFoundException.class);
         assertThatThrownBy(() -> service.returnLoan(5L)).isInstanceOf(NotFoundException.class);
 
         then(audit).should().record("BORROW_REQUESTED", "book 1, member 7");

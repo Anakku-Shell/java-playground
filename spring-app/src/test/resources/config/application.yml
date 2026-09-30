@@ -1,0 +1,10 @@
+# Test-only settings. Spring Boot reads classpath:/application.yml and then classpath:/config/
+# application.yml, the second one on top: so this file adds keys to the main configuration without
+# hiding it, and without a profile to activate. (A test-side application.yml at the classpath root
+# would replace the main one, since both have the same name on the same classpath.)
+# Guide: §5.7 Security.
+library:
+  security:
+    jwt:
+      # Only for the test suite. Real secrets never go in a committed file.
+      secret: test-suite-only-secret-0123456789abcdef

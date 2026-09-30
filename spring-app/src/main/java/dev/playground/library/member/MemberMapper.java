@@ -1,7 +1,7 @@
 package dev.playground.library.member;
 
-import dev.playground.library.member.dto.CreateMemberRequest;
 import dev.playground.library.member.dto.MemberResponse;
+import dev.playground.library.member.dto.RegisterRequest;
 import java.util.Locale;
 
 /** Manual mapping between {@link Member} and its DTOs. Guide: §5.5 Advanced JPA. */
@@ -16,10 +16,11 @@ public final class MemberMapper {
     }
 
     public static MemberResponse toResponse(Member member) {
-        return new MemberResponse(member.getId(), member.getEmail(), member.getFullName());
+        return new MemberResponse(member.getId(), member.getEmail(), member.getFullName(), member.getRole());
     }
 
-    public static Member toNewMember(CreateMemberRequest request) {
-        return new Member(normalizeEmail(request.email()), request.fullName());
+    /** A new member registers as MEMBER; librarians are appointed, not self-registered. */
+    public static Member toNewMember(RegisterRequest request, String passwordHash) {
+        return new Member(normalizeEmail(request.email()), request.fullName(), passwordHash, Role.MEMBER);
     }
 }

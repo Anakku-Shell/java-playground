@@ -17,9 +17,14 @@ import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.core.PropertyReferenceException;
 import org.springframework.data.core.TypeInformation;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.orm.ObjectOptimisticLockingFailureException;
+import org.springframework.security.access.AccessDeniedException;
+import org.springframework.security.authentication.BadCredentialsException;
+import org.springframework.security.authentication.InsufficientAuthenticationException;
+import org.springframework.security.oauth2.server.resource.InvalidBearerTokenException;
 import org.springframework.test.web.servlet.assertj.MockMvcTester;
 import org.springframework.test.web.servlet.assertj.MvcTestResult;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
@@ -29,6 +34,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.method.annotation.HandlerMethodValidationException;
 
@@ -162,6 +168,73 @@ class GlobalExceptionHandlerTest {
                 .contains("at dev.playground.library.common.GlobalExceptionHandlerTest$ThrowingController");
     }
 
+    // Security (§5.7). Spring Security throws these from its filters (no or bad token) and from
+    // method security inside a controller or service (@PreAuthorize). The filters hand theirs to this
+    // same handler (SecurityProblemHandler), so every 401 and 403 has one shape. Without these
+    // handlers the catch-all below would turn them into 500s.
+
+    @Test
+    void badCredentialsAre401WithoutSayingWhichPartWasWrong() {
+        // One message for "no such email" and "wrong password": telling them apart would let anyone
+        // find out which emails have an account.
+        assertThat(mvc.post().uri("/things/login"))
+                .hasStatus(HttpStatus.UNAUTHORIZED)
+                .hasHeader(HttpHeaders.WWW_AUTHENTICATE, "Bearer")
+                .bodyJson()
+                .isStrictlyEqualTo("""
+                        {
+                          "title": "Unauthorized",
+                          "status": 401,
+                          "detail": "Invalid email or password.",
+                          "instance": "/things/login"
+                        }
+                        """);
+    }
+
+    @Test
+    void anInvalidTokenIs401WithoutTheDecoderMessage() {
+        // RFC 6750: a rejected token is answered with error="invalid_token". The decoder's own message
+        // (which check failed, and why) stays out of the body.
+        assertThat(mvc.get().uri("/things/token"))
+                .hasStatus(HttpStatus.UNAUTHORIZED)
+                .hasHeader(HttpHeaders.WWW_AUTHENTICATE, "Bearer error=\"invalid_token\"")
+                .bodyJson()
+                .extractingPath("$.detail")
+                .isEqualTo("The bearer token is invalid or has expired.");
+    }
+
+    @Test
+    void noAuthenticationIs401() {
+        assertThat(mvc.get().uri("/things/anonymous"))
+                .hasStatus(HttpStatus.UNAUTHORIZED)
+                .hasHeader(HttpHeaders.WWW_AUTHENTICATE, "Bearer")
+                .bodyJson()
+                .extractingPath("$.detail")
+                .isEqualTo("Authentication is required: send a bearer token.");
+    }
+
+    @Test
+    void accessDeniedIs403() {
+        // Authenticated, but not allowed: 403. (401 means "we do not know who you are".)
+        assertThat(mvc.get().uri("/things/forbidden"))
+                .hasStatus(HttpStatus.FORBIDDEN)
+                .hasContentType(MediaType.APPLICATION_PROBLEM_JSON)
+                .bodyJson()
+                .extractingPath("$.detail")
+                .isEqualTo("You are not allowed to do this.");
+    }
+
+    @Test
+    void anExceptionWithResponseStatusKeepsItsStatus() {
+        // @ResponseStatus on an exception class sets its HTTP status. The catch-all would otherwise
+        // catch it first and answer 500.
+        assertThat(mvc.get().uri("/things/gone"))
+                .hasStatus(HttpStatus.GONE)
+                .bodyJson()
+                .extractingPath("$.detail")
+                .isEqualTo("This thing was retired");
+    }
+
     @Test
     void invalidBodyIs400WithErrorsPerField() {
         // Two broken fields; "code" breaks two constraints.
@@ -236,6 +309,9 @@ class GlobalExceptionHandlerTest {
                 .isEqualTo("Failed to read request");
     }
 
+    @ResponseStatus(code = HttpStatus.GONE, reason = "This thing was retired")
+    static class RetiredThingException extends RuntimeException {}
+
     record ThingRequest(
             @NotBlank String name,
             @Size(max = 3) @Pattern(regexp = "[A-Z]*") String code) {}
@@ -285,6 +361,32 @@ class GlobalExceptionHandlerTest {
         @GetMapping("/things/boom")
         void boom() {
             throw new IllegalStateException("secret internal detail");
+        }
+
+        @PostMapping("/things/login")
+        void login() {
+            throw new BadCredentialsException("Bad credentials");
+        }
+
+        @GetMapping("/things/token")
+        void token() {
+            throw new InvalidBearerTokenException(
+                    "An error occurred while attempting to decode the Jwt: Signed JWT rejected: Invalid signature");
+        }
+
+        @GetMapping("/things/anonymous")
+        void anonymous() {
+            throw new InsufficientAuthenticationException("Full authentication is required to access this resource");
+        }
+
+        @GetMapping("/things/forbidden")
+        void forbidden() {
+            throw new AccessDeniedException("Access Denied");
+        }
+
+        @GetMapping("/things/gone")
+        void gone() {
+            throw new RetiredThingException();
         }
 
         @PostMapping("/things")

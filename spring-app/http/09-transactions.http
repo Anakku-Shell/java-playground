@@ -8,16 +8,26 @@
 
 @host = http://localhost:8080
 
+### Since §5.7 every request needs a token: log in as the demo librarian first (200). The others
+### send it in their Authorization header
+# @name login
+POST {{host}}/api/auth/login
+Content-Type: application/json
+
+{"email": "librarian@library.test", "password": "demo-password"}
+
 ### Alan has the only copy of The Dispossessed, so Ada's borrow is refused (409). The borrow's
 ### transaction rolls back. Before that, the console shows an insert into audit_events: it ran in a
 ### transaction of its own (REQUIRES_NEW), already committed
 POST {{host}}/api/loans
+Authorization: Bearer {{login.response.body.accessToken}}
 Content-Type: application/json
 
 {"bookId": 4, "memberId": 1}
 
 ### The audit trail, newest first (200): the refused borrow is there, the loan is not
 GET {{host}}/api/audit-events
+Authorization: Bearer {{login.response.body.accessToken}}
 
 ### Alan borrows Cosmos (201). At commit the console shows the two forced version bumps
 ###   update books set version=? where id=? and version=?
@@ -25,24 +35,29 @@ GET {{host}}/api/audit-events
 ### A second borrow of Cosmos, or a second borrow by Alan, racing this one would match no row (409)
 # @name loan
 POST {{host}}/api/loans
+Authorization: Bearer {{login.response.body.accessToken}}
 Content-Type: application/json
 
 {"bookId": 8, "memberId": 2}
 
 ### Return it (200). The UPDATE of the loan ends with "where id=? and version=?" (@Version on Loan)
 POST {{host}}/api/loans/{{loan.response.body.id}}/return
+Authorization: Bearer {{login.response.body.accessToken}}
 
 ### Return it again (409, "... was already returned"): the check, not the lock, since the first
 ### return committed long ago
 POST {{host}}/api/loans/{{loan.response.body.id}}/return
+Authorization: Bearer {{login.response.body.accessToken}}
 
 ### An edit bumps the version as well: "update books set ..., version=? where id=? and version=?".
 ### A borrow of Cosmos racing this edit collides with it: whichever commits second gets a 409.
 ### Alone, the edit is a 200
 PUT {{host}}/api/books/8
+Authorization: Bearer {{login.response.body.accessToken}}
 Content-Type: application/json
 
 {"isbn": "9780345539434", "title": "Cosmos", "publishedYear": 1980, "totalCopies": 3, "authorIds": [4]}
 
 ### Four events (200): two returns, two borrows, rejected or not
 GET {{host}}/api/audit-events
+Authorization: Bearer {{login.response.body.accessToken}}

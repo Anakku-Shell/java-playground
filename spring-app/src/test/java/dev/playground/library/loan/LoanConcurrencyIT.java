@@ -6,11 +6,13 @@ import static org.awaitility.Awaitility.await;
 
 import com.jayway.jsonpath.JsonPath;
 import dev.playground.library.TestTables;
+import dev.playground.library.TestUsers;
 import dev.playground.library.TestcontainersConfiguration;
 import dev.playground.library.book.Book;
 import dev.playground.library.book.BookRepository;
 import dev.playground.library.member.Member;
 import dev.playground.library.member.MemberRepository;
+import dev.playground.library.member.Role;
 import java.sql.Connection;
 import java.sql.Statement;
 import java.sql.Timestamp;
@@ -71,8 +73,8 @@ class LoanConcurrencyIT {
     void aBookWithOneCopyAndTwoMembers() {
         TestTables.truncateAll(jdbc);
         lastCopy = books.save(new Book("9780061054884", "The Dispossessed", 1974, 1));
-        ada = members.save(new Member("ada@library.test", "Ada Lovelace"));
-        alan = members.save(new Member("alan@library.test", "Alan Turing"));
+        ada = members.save(new Member("ada@library.test", "Ada Lovelace", null, Role.MEMBER));
+        alan = members.save(new Member("alan@library.test", "Alan Turing", null, Role.MEMBER));
     }
 
     @AfterEach
@@ -111,6 +113,7 @@ class LoanConcurrencyIT {
                 () -> borrow(lastCopy, ada),
                 () -> mvc.put()
                         .uri("/api/books/{id}", lastCopy.getId())
+                        .with(TestUsers.librarian())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
                         {"isbn": "9780061054884", "title": "The Dispossessed", "totalCopies": 2}
@@ -153,6 +156,9 @@ class LoanConcurrencyIT {
      * pass), but their first write to it waits. Once both wait, the test commits, which releases
      * the lock, and the two requests race to commit. A request that finishes while the lock is held
      * never reached its write (a 404, or a check that already failed): the test says so at once.
+     *
+     * <p>The requests run on pool threads, so they carry their caller themselves ({@code TestUsers}):
+     * {@code @WithMockUser} would set it on the test thread only.
      */
     private List<MvcTestResult> raceForResults(
             String table, Callable<MvcTestResult> first, Callable<MvcTestResult> second) throws Exception {
@@ -187,6 +193,7 @@ class LoanConcurrencyIT {
     private MvcTestResult borrow(Book book, Member member) {
         return mvc.post()
                 .uri("/api/loans")
+                .with(TestUsers.member(member))
                 .contentType(MediaType.APPLICATION_JSON)
                 .content("""
                         {"bookId": %d, "memberId": %d}
@@ -195,7 +202,10 @@ class LoanConcurrencyIT {
     }
 
     private MvcTestResult giveBack(long loan) {
-        return mvc.post().uri("/api/loans/{id}/return", loan).exchange();
+        return mvc.post()
+                .uri("/api/loans/{id}/return", loan)
+                .with(TestUsers.librarian())
+                .exchange();
     }
 
     private static long idOf(MvcTestResult result) throws Exception {
