@@ -513,7 +513,105 @@ catalog.findByTitle("Dune Messiah")
 
 ### 4.3 Concurrency
 
-_Written in Phase 03._
+**What it is.** Running work on several threads at once: the raw `Thread` API, executors (thread pools), `CompletableFuture` for chaining async steps, and virtual threads. The examples are in [`concurrency/`](../java-core/src/test/java/dev/playground/core/concurrency/) under `java-core/src/test/java/dev/playground/core/`. Run them with `./mvnw -pl java-core test -Dtest=CompletableFutureTest` (or any other class name). Every test has a `@Timeout`, so a concurrency bug fails instead of hanging the build.
+
+**Why it matters.** A Spring MVC app is multi-threaded from the first request: Tomcat serves each request on its own thread, so every singleton bean (services, repositories) is shared between threads. Shared mutable state in a bean is a race condition waiting to happen. Calling several remote services in parallel is the other everyday case.
+
+#### Threads and race conditions — `ThreadsTest`
+
+```java
+Thread worker = new Thread(task, "worker-1");
+worker.start();   // runs task on a new thread and returns at once
+worker.join();    // waits for it to finish
+```
+
+`worker.run()` compiles too, but it is a plain method call on the current thread: no concurrency at all.
+
+**The race.** `UnsafeCounter.increment()` does `count++`, which is three steps: read, add, write. Two threads can read the same value and both write value + 1, so an increment is lost. `Hammer.hammer` starts 8 threads that each increment 100 000 times; with `UnsafeCounter` the total usually ends up well below 800 000. The test `racyCounterLosesUpdates` is `@Disabled` because a test that fails *usually* is useless; the comment above it shows how to run it anyway.
+
+Three fixes, all exact:
+
+| Fix | Class | How it works | Use it for |
+|---|---|---|---|
+| A lock | `SynchronizedCounter` | `synchronized` methods: one thread at a time per object | Several fields that must change together |
+| An atomic | `AtomicCounter` | `AtomicInteger.incrementAndGet()`: one atomic hardware operation, no lock | A single counter or reference |
+| A concurrent collection | `ConcurrentHashMap` | `merge(key, 1, Integer::sum)` is atomic per key | Shared maps and caches |
+
+`synchronized` also guarantees **visibility**: what one thread wrote before releasing the lock is seen by the next thread that takes it. Without a lock, an atomic, `volatile` or `join`, a thread may read a stale value. That is why `SynchronizedCounter.value()` is synchronized too.
+
+**Interruption** is how you ask a thread to stop. `interrupt()` wakes a thread blocked in `sleep`, `wait` or `join` with an `InterruptedException`; the thread decides what to do. Code that catches it and does not stop should restore the flag with `Thread.currentThread().interrupt()` (see `CheckedFunctions` in §4.2).
+
+#### Executors — `ExecutorsTest`
+
+You rarely create threads yourself. An `ExecutorService` owns a pool of threads, and you submit tasks to it:
+
+```java
+try (ExecutorService pool = Executors.newFixedThreadPool(3)) {
+    Future<Integer> pages = pool.submit(() -> 412 + 188);   // a Callable returns a value
+    int result = pages.get(5, TimeUnit.SECONDS);           // blocks until done
+}   // close(): no new tasks, waits for the submitted ones (Java 19+)
+```
+
+- `Future.get()` **blocks**. If the task threw, `get()` throws an `ExecutionException` with the real exception as its cause.
+- `get(timeout)` throws `TimeoutException`, but the task keeps running. `cancel(true)` interrupts it, which stops it only if the task blocks in an interruptible call (`sleep`, `await`…) or checks the flag.
+- `invokeAll(tasks)` runs a list of `Callable`s and returns when every one is done; the futures keep the tasks' order.
+- After `shutdown()` (or `close()`), `submit` throws `RejectedExecutionException`. A pool that is never shut down keeps its threads, and they are non-daemon threads, so they keep the JVM alive.
+
+In Spring you do not build pools by hand either: the framework provides a `TaskExecutor` bean and `@Async` (chapter 5.9).
+
+#### CompletableFuture — `CompletableFutureTest`, `AsyncCatalog`
+
+A `Future` can only be waited on. A `CompletableFuture` can be **chained**: you describe what happens when the value arrives, and no thread sits blocked in between. `AsyncCatalog` wraps the §4.2 `BookCatalog` so that each lookup returns a `CompletableFuture`.
+
+```java
+CompletableFuture<String> summary = catalog.findAsync("Emma")
+        .thenCombine(catalog.stockAsync("Emma"), (book, stock) -> book.title() + ": " + stock)
+        .exceptionally(error -> "unknown");
+String text = summary.join();   // block once, at the end
+```
+
+| Method | Does | Streams / Optional equivalent |
+|---|---|---|
+| `supplyAsync(supplier, executor)` | Starts a task that returns a value | |
+| `thenApply(f)` | Transforms the value | `map` |
+| `thenCompose(f)` | Next step returns a future itself | `flatMap` |
+| `thenCombine(other, f)` | Joins two independent futures | |
+| `allOf(f1, f2, …)` | Completes when all are done (`Void`: read the values from the originals) | |
+| `exceptionally(f)` | Replaces an error with a value | |
+| `handle((value, error) -> …)` | Sees either the value or the error | |
+| `orTimeout` / `completeOnTimeout` | Fails with `TimeoutException` / completes with a default after a delay | |
+| `join()` / `get()` | Block for the result | |
+
+- Without an executor argument, `supplyAsync` runs on `ForkJoinPool.commonPool()` (or on a new thread per task when that pool has fewer than 2 threads, as on a 1–2 CPU machine): shared by the whole JVM and sized for CPU work. Pass your own executor for anything that blocks.
+- Errors skip the `thenApply` steps and travel down the chain until an `exceptionally` or `handle`. An exception thrown inside a stage arrives wrapped in a `CompletionException`, so look at `getCause()`. It arrives unwrapped only when the future was failed directly (`completeExceptionally`, `orTimeout`, `failedFuture`).
+- `join()` throws the unchecked `CompletionException`; `get()` throws the checked `ExecutionException`. Both have the real error as the cause.
+- `cancel(true)` on a `CompletableFuture` does **not** interrupt the task (`cancelMarksTheFutureButDoesNotStopTheWork`): the future is completed with a `CancellationException` and the work runs on. To really stop it, the task has to check a flag of its own.
+
+#### Virtual threads — `VirtualThreadsTest`
+
+A platform thread is an OS thread: expensive to create, about a megabyte of stack reserved: thousands of them, not millions. A **virtual thread** (Java 21) is managed by the JVM. When it blocks (sleep, socket read, JDBC call), the JVM unmounts it and its *carrier* (a platform thread) runs another virtual thread in the meantime. You can have millions.
+
+```java
+Thread.ofVirtual().start(task);
+try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
+    executor.submit(task);   // a new virtual thread per task, no pool size to tune
+}
+```
+
+`tenThousandSleepingTasksFinishQuickly` runs 10 000 tasks that sleep 10 ms each; they all overlap and finish in well under a second. A fixed pool of 10 platform threads can only have 10 sleeps in flight: `aFixedPlatformPoolQueuesTheWaiting` shows 100 such tasks taking at least 100 ms, so the 10 000 would need 10 s.
+
+- Virtual threads help with **waiting** (blocking I/O). They do not speed up CPU-bound work: by default there are only as many carriers as cores.
+- Do not pool them: they are cheap, create one per task.
+- Write plain blocking code (`restClient.get()...`, a JDBC query) and run it on a virtual thread. You get the scalability of async code without the callbacks.
+- Spring Boot runs Tomcat's request handling on virtual threads when you set `spring.threads.virtual.enabled: true`.
+- A virtual thread that cannot be unmounted *pins* its carrier while it blocks: inside a class initialiser, or with native (JNI/FFM) code on its stack. Since Java 24 (JEP 491), `synchronized` no longer pins. File I/O does not unmount either; the scheduler adds a temporary carrier to compensate.
+
+**Gotchas**
+- `thread.run()` instead of `thread.start()` runs the code on the current thread.
+- Swallowing `InterruptedException` hides the stop request. Restore the flag or rethrow.
+- `Future.get()` without a timeout can wait forever. Tests should always use a bound.
+- `HashMap`, `ArrayList` and the other ordinary collections are not thread-safe. Use `ConcurrentHashMap`, or do not share them.
+- A fixed thread pool that is never shut down keeps the JVM running. Use try-with-resources.
 
 ---
 
@@ -616,6 +714,16 @@ A map for orientation, not a claim that the pieces are identical. It grows with 
 | Delegates, method groups | Functional interfaces, method references (`String::length`) | |
 | LINQ to Objects | Streams API | Both lazy. No query syntax, and a stream is single-use (see below) |
 | Nullable reference types (`string?`), `?.`, `??` | `Optional<T>` with `map`, `orElse` | Only for return values; fields and parameters are plain (nullable) references |
+| `Thread` | `Thread` | Same idea; `Thread.ofPlatform()` / `Thread.ofVirtual()` builders |
+| `ThreadPool`, `Task.Run` | `ExecutorService` (`Executors.newFixedThreadPool`…) | Java makes you pick and close the pool |
+| `Task<T>` | `CompletableFuture<T>` | `ContinueWith` ↔ `thenApply`/`thenCompose`, `Task.WhenAll` ↔ `allOf` (which returns `Void`, not the results), `.Result`/`.Wait()` ↔ `join()`/`get()` |
+| `async` / `await` | No keywords: chain `CompletableFuture`s, or write blocking code on virtual threads | |
+| Async I/O freeing the thread while it waits | Virtual threads | Same effect (cheap waiting), different route: the code stays blocking and the JVM parks the thread |
+| `lock (obj) { … }` | `synchronized (obj) { … }` / `synchronized` methods | |
+| `Interlocked.Increment` | `AtomicInteger.incrementAndGet()` | `Interlocked` works on a plain field; Java needs an `AtomicInteger` object (or a `VarHandle`) |
+| `ConcurrentDictionary.AddOrUpdate` | `ConcurrentHashMap.merge` / `compute` | Opposite guarantee: .NET may run the update delegate more than once, outside the lock. Java runs it once, atomically, holding a lock, so keep it short and do not touch the map inside it |
+| `CancellationToken` | `Thread.interrupt()` / `Future.cancel(true)` | Interruption is cooperative too. `cancel(true)` interrupts only executor tasks; on a `CompletableFuture` it marks the future cancelled and the work keeps running |
+| `AggregateException` from `.Result` | `ExecutionException` (`get`) / `CompletionException` (`join`) | The real exception is the cause |
 
 **LINQ ↔ Streams**
 
@@ -644,3 +752,8 @@ A map for orientation, not a claim that the pieces are identical. It grows with 
 - **Locale-sensitive formatting.** `String.format` and `toUpperCase()` use the machine's locale unless you pass `Locale.ROOT`.
 - **Streams are single-use.** An `IEnumerable` can be enumerated again. A second terminal operation on a stream throws `IllegalStateException`, so store the collection, not the stream.
 - **Read-only collections are a runtime property.** `List.of(...)` and `stream.toList()` return a `List` that throws on `add`. The compiler does not help.
+- **No `await`.** A method that returns `CompletableFuture` does not suspend anything. Calling `join()` blocks the current thread. Either keep chaining or accept the blocking (cheap on a virtual thread).
+- **The default async pool.** `CompletableFuture.supplyAsync(task)` without an executor uses the JVM-wide `ForkJoinPool.commonPool()` (on machines with more than 2 CPUs). Blocking calls there starve everything else that uses it.
+- **`start()`, not `run()`.** `thread.run()` compiles and runs the task on the current thread.
+- **Wrapped exceptions.** `Future.get()` throws `ExecutionException` and `CompletableFuture.join()` throws `CompletionException`. A `catch (NoSuchElementException e)` around them never fires; unwrap `getCause()`.
+- **Cancelling a `CompletableFuture` does not stop the work.** Unlike a `Task` with a `CancellationToken`, `cancel(true)` only completes the future with a `CancellationException`; the running code carries on.
