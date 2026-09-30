@@ -6,3 +6,8 @@ spring:
 
 server:
   port: 8080
+
+# Bound to dev.playground.library.config.LibraryProperties. The loan rules are not set here, so
+# their @DefaultValue defaults apply (max-active 3, duration-days 14).
+library:
+  name: Playground Library

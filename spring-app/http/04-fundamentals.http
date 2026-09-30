@@ -1,0 +1,13 @@
+### Guide §5.1 Spring Boot fundamentals. Open in VS Code with the REST Client extension and click
+### "Send Request" above a request. The app must be running on :8080.
+
+@host = http://localhost:8080
+
+### Configuration, profiles and @Value (200)
+GET {{host}}/api/info
+
+### The @Primary greeter and the @Qualifier("casual") one (200)
+GET {{host}}/api/info/greetings?name=Ada
+
+### Without the parameter the default "reader" is used (200)
+GET {{host}}/api/info/greetings

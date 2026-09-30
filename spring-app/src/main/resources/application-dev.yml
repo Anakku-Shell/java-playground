@@ -1,0 +1,9 @@
+# Loaded only with the dev profile (SPRING_PROFILES_ACTIVE=dev, --spring.profiles.active=dev or
+# -Dspring-boot.run.profiles=dev). Its keys override application.yml; the rest is inherited.
+# Guide: §5.1 Spring Boot fundamentals.
+library:
+  name: Playground Library (dev)
+
+logging:
+  level:
+    dev.playground: DEBUG

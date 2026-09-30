@@ -235,7 +235,7 @@ Spring Boot inverts this: **your app owns `main()` and starts an embedded Tomcat
 
 ### Where the playground is right now
 
-`LibraryApplication` starts, Tomcat listens on port 8080, and any URL answers **404** because no controller exists yet. `LibraryApplicationTest` (`@SpringBootTest`) boots the same context in a test, so a broken configuration fails the build.
+`LibraryApplication` starts and Tomcat listens on port 8080. The only endpoints are `GET /api/info` and `GET /api/info/greetings` from §5.1; every other URL answers **404**. `LibraryApplicationTest` (`@SpringBootTest`) boots the same context in a test, so a broken configuration fails the build.
 
 ---
 
@@ -619,7 +619,153 @@ try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
 
 ### 5.1 Spring Boot fundamentals
 
-_Written in Phase 04._
+**What it is.** The machinery every later chapter relies on: the IoC container and its beans, dependency injection, scopes and lifecycle, auto-configuration, configuration files and profiles, and logging. The code is in `spring-app`: [`config/`](../spring-app/src/main/java/dev/playground/library/config/) (`LibraryProperties`, `LifecycleLogger`, `DevModeBanner`) and [`info/`](../spring-app/src/main/java/dev/playground/library/info/) (`InfoController`, the greeters). The tests are in the matching test packages plus [`fundamentals/`](../spring-app/src/test/java/dev/playground/library/fundamentals/). Requests to try: [`http/04-fundamentals.http`](../spring-app/http/04-fundamentals.http).
+
+**Why it matters.** Once you know how the container finds, builds and wires beans, most Spring "magic" becomes predictable, and so do most startup errors.
+
+#### The container and beans — `DependencyInjectionTest`
+
+A **bean** is an object the Spring container (the `ApplicationContext`) creates, wires and manages. You mark a class for component scanning with a *stereotype* annotation:
+
+| Annotation | Meaning |
+|---|---|
+| `@Component` | A generic bean |
+| `@Service` | Business logic. Same as `@Component`; the name documents the role |
+| `@Repository` | Data access. Also translates persistence exceptions into Spring's `DataAccessException` (when a `PersistenceExceptionTranslationPostProcessor` is registered; Boot adds one once JPA or JDBC is on the classpath) |
+| `@Controller` / `@RestController` | Web layer; `@RestController` writes return values as the response body (JSON) |
+| `@Configuration` + `@Bean` methods | Beans you build yourself, typically for classes you do not own |
+
+**Constructor injection.** A bean lists its dependencies as constructor parameters, and the container passes them in. With a single constructor, no `@Autowired` is needed:
+
+```java
+public InfoController(LibraryProperties properties, Environment environment,
+        Greeter greeter, @Qualifier("casual") Greeter casualGreeter,
+        @Value("${spring.application.name}") String applicationName) { ... }
+```
+
+This keeps fields `final`, shows every dependency in the signature, never leaves a half-built object, and lets a unit test create the class with `new`. Field injection (`@Autowired` on a field) hides dependencies and needs reflection to test. It is fine only in test classes, which JUnit creates.
+
+**Several candidates.** `Greeter` has two implementations. The container resolves a parameter like this:
+- **one** matching bean → injected;
+- **several**, one of them `@Primary` → the primary one (`FormalGreeter`);
+- **several** and a `@Qualifier("casual")` on the parameter → the bean with that qualifier (`CasualGreeter`);
+- **several** and neither → startup fails with `NoUniqueBeanDefinitionException`;
+- **none** → startup fails with `NoSuchBeanDefinitionException` ("No qualifying bean of type…").
+
+`DependencyInjectionTest` checks each case with `ApplicationContextRunner`, which starts a tiny context with only the classes you name. `assertThat(context).hasFailed()` lets you test the failures too.
+
+#### Scopes and lifecycle — `BeanScopesTest`, `LifecycleLoggerTest`
+
+`BeanScopesTest` uses the plain Spring Framework container (`new AnnotationConfigApplicationContext(...)`): what Spring Boot builds for you, without Boot.
+
+| Scope | Instances | Typical use |
+|---|---|---|
+| `singleton` (default) | One per container, shared by all | Services, repositories, controllers: almost everything |
+| `prototype` | A new one on every lookup or injection | Stateful helpers |
+| `request` / `session` | One per HTTP request / session | Rare in REST APIs |
+
+Singletons are shared by every request thread (§4.3), so keep them **stateless**: no mutable fields holding per-request data.
+
+Two surprises with prototypes:
+- A prototype injected into a singleton is created **once**, when the singleton is built, so in practice it behaves like a singleton. Inject an `ObjectProvider<T>` and call `getObject()` when you need a fresh instance.
+- The container does not track prototypes after handing them out, so their `@PreDestroy` is never called.
+
+The lifecycle of a singleton, as logged by `LifecycleLogger`:
+
+```
+constructor → dependencies injected → @PostConstruct → … all beans ready …
+→ Tomcat started → ApplicationRunner beans (DevModeBanner) → ApplicationReadyEvent
+→ … requests … → context closing → @PreDestroy
+```
+
+`@PostConstruct` and `@PreDestroy` come from `jakarta.annotation`. `@EventListener` on a method subscribes to an application event; `ApplicationReadyEvent` means the app is fully started. To run code once at startup, implement `ApplicationRunner` (or `CommandLineRunner`).
+
+#### Auto-configuration and starters
+
+`@EnableAutoConfiguration` (inside `@SpringBootApplication`) loads the auto-configuration classes listed by the jars on the classpath. Each one is guarded by conditions:
+
+```java
+@AutoConfiguration
+@ConditionalOnClass(DispatcherServlet.class)        // only if Spring MVC is on the classpath
+public class WebMvcAutoConfiguration {
+    @Bean
+    @ConditionalOnMissingBean                          // only if you did not define your own
+    public SomeMvcBean someMvcBean() { ... }
+}
+```
+
+So **adding a starter to the POM switches features on**, and **defining your own bean switches the default off**. To see what was applied and why, start the app with `--debug` (or `debug: true` in `application.yml`). The log then prints the *CONDITIONS EVALUATION REPORT*: "Positive matches" and "Negative matches", each with the reason. Starters (§2) are just dependency bundles; the auto-configuration inside them is what does the work.
+
+#### Configuration — `LibraryPropertiesTest`
+
+Settings come from many **property sources**, and a higher one overrides a lower one. The most useful, highest first:
+
+1. Test properties (`@SpringBootTest(properties = ...)`, `@TestPropertySource`)
+2. Command-line arguments: `--library.loans.max-active=5`
+3. Java system properties: `-Dlibrary.loans.max-active=5`
+4. OS environment variables: `LIBRARY_LOANS_MAXACTIVE=5`
+5. Profile files: `application-dev.yml`
+6. `application.yml`
+7. Defaults in code (`@DefaultValue`)
+
+The environment variable name comes from **relaxed binding**: uppercase, `.` becomes `_`, dashes are dropped. So `LIBRARY_LOANS_MAX_ACTIVE` does **not** work: its extra `_` reads as another level (`max.active`). In YAML, `max-active` (the recommended form) and `maxActive` both bind to the `maxActive` component.
+
+**`@ConfigurationProperties`** binds a whole prefix into a typed object:
+
+```java
+@ConfigurationProperties("library")
+public record LibraryProperties(String name, @DefaultValue Loans loans) {
+    public record Loans(@DefaultValue("3") int maxActive, @DefaultValue("14") int durationDays) {}
+}
+```
+
+`@ConfigurationPropertiesScan` on `LibraryApplication` registers it as a bean. A record makes the settings immutable. The empty `@DefaultValue` on `loans` creates the nested record with its own defaults when the whole `library.loans` group is missing; without it, `loans` would be `null`. **`@Value("${key}")`** injects a single value (`InfoController` uses it for `spring.application.name`). It is fine for one-off values; for groups of settings prefer a properties record, which gives one place, types, defaults and, from §5.3, validation.
+
+`LibraryPropertiesTest` uses `@SpringBootTest(classes = Config.class)`: a context with only the binding, not the whole app. `application.yml` is still read.
+
+#### Profiles
+
+A profile is a named set of configuration and beans, like an environment name.
+- `application-dev.yml` is loaded on top of `application.yml` when `dev` is active; its keys win.
+- `@Profile("dev")` on a bean creates it only in that profile (`DevModeBanner`).
+- Activate with `SPRING_PROFILES_ACTIVE=dev` (the VS Code launch configuration does this), `--spring.profiles.active=dev`, or `./mvnw -pl spring-app spring-boot:run -Dspring-boot.run.profiles=dev`. In tests: `@ActiveProfiles("dev")`.
+- Tests read OS environment variables too. With `SPRING_PROFILES_ACTIVE=dev` exported in your shell, every test runs with `dev` and `InfoControllerTest` fails. Set it per run, not globally.
+- With no active profile, Spring uses the `default` profile, and `Environment.getActiveProfiles()` returns an empty array (see `GET /api/info`).
+
+#### Logging
+
+Spring Boot logs through **SLF4J** (the API you code against) and **Logback** (the implementation, chosen by `spring-boot-starter-logging`).
+
+```java
+private static final Logger log = LoggerFactory.getLogger(LifecycleLogger.class);
+log.info("Library ready on port {}", port);   // {} placeholders: the message is built only if INFO is on
+```
+
+Levels are set per package: `logging.level.dev.playground: DEBUG` in `application-dev.yml`, `logging.level.root: WARN` to quiet everything else. Do not concatenate strings in log calls; the placeholders skip the work when the level is off.
+
+#### The info endpoint and slice tests — `InfoControllerTest`
+
+`GET /api/info` returns the bound configuration, the `@Value` field and the active profiles. `GET /api/info/greetings?name=Ada` shows the `@Primary` and the qualified greeter side by side.
+
+`@WebMvcTest(InfoController.class)` is a **slice test**. It starts the MVC layer only: the controller, Jackson and the MVC infrastructure, with no Tomcat, no other `@Component`s and no `@ConfigurationPropertiesScan`. So the test brings the greeters with `@Import` and the properties with `@EnableConfigurationProperties`. `MockMvcTester` sends requests and asserts on the JSON:
+
+```java
+assertThat(mvc.get().uri("/api/info"))
+        .hasStatusOk()
+        .bodyJson()
+        .isStrictlyEqualTo("""
+                { "application": "library", "name": "Playground Library", ... }
+                """);
+```
+
+Slices keep tests fast and focused. `@SpringBootTest` with no `classes` starts the whole application; the playground keeps that for `LibraryApplicationTest` and the integration tests (§5.8).
+
+**Gotchas**
+- A class outside `dev.playground.library` is not scanned, so it is not a bean, and injecting it fails at startup.
+- `new InfoController(...)` in your own code gives an object the container does not manage: it is not injected anywhere, and its `@PostConstruct` and `@PreDestroy` never run. Let the container create beans and inject them.
+- A bean with two constructors needs `@Autowired` on the one Spring should use. Worse, if one of them takes no arguments, Spring silently uses that one and the dependencies stay `null`.
+- `@Value("${missing.key}")` fails at startup; `@Value("${missing.key:fallback}")` supplies a default.
+- A property with a typo (`library.loans.max-activ`) is silently ignored: nothing binds it.
 
 ### 5.2 REST API
 
@@ -718,12 +864,25 @@ A map for orientation, not a claim that the pieces are identical. It grows with 
 | `ThreadPool`, `Task.Run` | `ExecutorService` (`Executors.newFixedThreadPool`…) | Java makes you pick and close the pool |
 | `Task<T>` | `CompletableFuture<T>` | `ContinueWith` ↔ `thenApply`/`thenCompose`, `Task.WhenAll` ↔ `allOf` (which returns `Void`, not the results), `.Result`/`.Wait()` ↔ `join()`/`get()` |
 | `async` / `await` | No keywords: chain `CompletableFuture`s, or write blocking code on virtual threads | |
-| Async I/O freeing the thread while it waits | Virtual threads | Same effect (cheap waiting), different route: the code stays blocking and the JVM parks the thread |
+| Async I/O freeing the thread while it waits | Virtual threads | Same effect (cheap waiting), different route: the code stays blocking and the JVM unmounts the virtual thread |
 | `lock (obj) { … }` | `synchronized (obj) { … }` / `synchronized` methods | |
 | `Interlocked.Increment` | `AtomicInteger.incrementAndGet()` | `Interlocked` works on a plain field; Java needs an `AtomicInteger` object (or a `VarHandle`) |
 | `ConcurrentDictionary.AddOrUpdate` | `ConcurrentHashMap.merge` / `compute` | Opposite guarantee: .NET may run the update delegate more than once, outside the lock. Java runs it once, atomically, holding a lock, so keep it short and do not touch the map inside it |
 | `CancellationToken` | `Thread.interrupt()` / `Future.cancel(true)` | Interruption is cooperative too. `cancel(true)` interrupts only executor tasks; on a `CompletableFuture` it marks the future cancelled and the work keeps running |
 | `AggregateException` from `.Result` | `ExecutionException` (`get`) / `CompletionException` (`join`) | The real exception is the cause |
+| `IServiceCollection` + `services.AddScoped<IFoo, Foo>()` | Component scanning (`@Component`/`@Service`…) or `@Bean` methods | Spring discovers beans by scanning packages instead of explicit registration |
+| Lifetimes: Singleton / Scoped / Transient | Scopes: `singleton` / `request` / `prototype` | Spring's default is singleton, where .NET makes you pick. Not exact matches: a Spring prototype's `@PreDestroy` never runs, while .NET disposes transients with their scope |
+| Constructor injection | Constructor injection | Same idea; one constructor needs no annotation |
+| Several registrations of `IFoo`, the last one wins | Several beans of a type fail unless one is `@Primary` or the parameter has a `@Qualifier` | .NET 8 keyed services ↔ `@Qualifier`. `IEnumerable<IFoo>` ↔ a `List<Foo>` parameter, which receives every matching bean |
+| `appsettings.json` / `appsettings.{Environment}.json` | `application.yml` / `application-{profile}.yml` | |
+| `ASPNETCORE_ENVIRONMENT=Development` | `SPRING_PROFILES_ACTIVE=dev` | Spring can activate several profiles at once |
+| `IOptions<T>` + `services.Configure<T>(section)` | `@ConfigurationProperties` record | Injected directly as the record, with no `.Value` wrapper |
+| `IConfiguration["Key"]` | `@Value("${key}")`, `Environment.getProperty("key")` | |
+| Env var `Library__Loans__MaxActive` | Env var `LIBRARY_LOANS_MAXACTIVE` | Relaxed binding |
+| `ILogger<T>` | SLF4J `Logger` via `LoggerFactory.getLogger(T.class)` | Logback is the default provider |
+| `IHostedService`, `IHostApplicationLifetime.ApplicationStarted` | `ApplicationRunner`, `@EventListener(ApplicationReadyEvent.class)` | A hosted service starts before the server listens; an `ApplicationRunner` runs after Tomcat has started |
+| `IDisposable` on a service | `@PreDestroy` | |
+| `WebApplicationFactory<T>` | `@SpringBootTest` (whole app) or slices such as `@WebMvcTest` | Slices have no direct .NET equivalent |
 
 **LINQ ↔ Streams**
 
@@ -757,3 +916,6 @@ A map for orientation, not a claim that the pieces are identical. It grows with 
 - **`start()`, not `run()`.** `thread.run()` compiles and runs the task on the current thread.
 - **Wrapped exceptions.** `Future.get()` throws `ExecutionException` and `CompletableFuture.join()` throws `CompletionException`. A `catch (NoSuchElementException e)` around them never fires; unwrap `getCause()`.
 - **Cancelling a `CompletableFuture` does not stop the work.** Unlike a `Task` with a `CancellationToken`, `cancel(true)` only completes the future with a `CancellationException`; the running code carries on.
+- **Beans are singletons by default.** A field in a `@Service` is shared by every request thread. In .NET you pick a lifetime on every registration; in Spring a missing choice means "one instance for everyone".
+- **Two beans of one type fail the startup.** .NET quietly injects the last registration. Spring stops with `NoUniqueBeanDefinitionException` until you add `@Primary` or `@Qualifier`.
+- **Unknown configuration keys are silently ignored.** A typo in `application.yml` does not fail anything; the default applies.
