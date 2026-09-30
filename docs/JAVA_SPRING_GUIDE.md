@@ -237,10 +237,10 @@ Spring Boot inverts this: **your app owns `main()` and starts an embedded Tomcat
 
 `LibraryApplication` starts and Tomcat listens on port 8080. It serves:
 - `/api/info` (§5.1);
-- CRUD for `/api/authors` and `/api/books`, kept in memory (§5.2);
+- CRUD for `/api/authors` and `/api/books` (§5.2), stored in PostgreSQL through Spring Data JPA (§5.4);
 - Swagger UI at `/swagger-ui.html`.
 
-Request bodies are validated, and every error is an RFC 9457 `ProblemDetail` (§5.3). `LibraryApplicationTest` (`@SpringBootTest`) boots the same context in a test, so a broken configuration fails the build.
+Request bodies are validated, and every error is an RFC 9457 `ProblemDetail` (§5.3). On `spring-boot:run`, Spring Boot starts PostgreSQL in Docker and Flyway creates the schema before Tomcat opens the port. `LibraryApplicationIT` (`@SpringBootTest` on a throwaway PostgreSQL) boots the same context in a test, so a broken configuration fails the build.
 
 ---
 
@@ -763,7 +763,7 @@ assertThat(mvc.get().uri("/api/info"))
                 """);
 ```
 
-Slices keep tests fast and focused. `@SpringBootTest` with no `classes` starts the whole application; the playground keeps that for `LibraryApplicationTest` and the integration tests (§5.8).
+Slices keep tests fast and focused. `@SpringBootTest` with no `classes` starts the whole application; the playground keeps that for `LibraryApplicationIT` and the other integration tests, which need Docker for their database (§5.4, §5.8).
 
 **Gotchas**
 - A class outside `dev.playground.library` is not scanned, so it is not a bean, and injecting it fails at startup.
@@ -774,7 +774,7 @@ Slices keep tests fast and focused. `@SpringBootTest` with no `classes` starts t
 
 ### 5.2 REST API
 
-**What it is.** CRUD endpoints for authors and books with Spring MVC, JSON through Jackson, and an OpenAPI document with Swagger UI. Storage is still in memory; §5.4 swaps it for PostgreSQL without touching the controllers. The code is in [`author/`](../spring-app/src/main/java/dev/playground/library/author/) and [`book/`](../spring-app/src/main/java/dev/playground/library/book/), plus `config/OpenApiConfig`. Requests: [`http/05-rest.http`](../spring-app/http/05-rest.http).
+**What it is.** CRUD endpoints for authors and books with Spring MVC, JSON through Jackson, and an OpenAPI document with Swagger UI. This chapter first kept the data in memory; §5.4 swapped the storage for PostgreSQL without touching the controllers. The code is in [`author/`](../spring-app/src/main/java/dev/playground/library/author/) and [`book/`](../spring-app/src/main/java/dev/playground/library/book/), plus `config/OpenApiConfig`. Requests: [`http/05-rest.http`](../spring-app/http/05-rest.http).
 
 **Why it matters.** This layering (controller → service → repository, with DTOs at the edge) is the shape of almost every Spring API you will work on.
 
@@ -784,8 +784,8 @@ Slices keep tests fast and focused. `@SpringBootTest` with no `classes` starts t
 book/
   BookController   HTTP only: paths, status codes, headers
   BookService      use cases; takes and returns DTOs
-  BookRepository   storage (a ConcurrentHashMap for now, Spring Data JPA from §5.4)
-  Book             the stored object: a plain class now, a JPA entity from §5.4
+  BookRepository   storage (a ConcurrentHashMap at first, a Spring Data JPA interface since §5.4)
+  Book             the stored object (a plain class at first, a JPA entity since §5.4)
   BookMapper       static Book ↔ DTO methods, written by hand
   dto/             BookResponse, CreateBookRequest, UpdateBookRequest, AuthorSummary (records)
 ```
@@ -858,7 +858,7 @@ Spring Boot 4 uses **Jackson 3**, whose packages moved from `com.fasterxml.jacks
 
 #### Two kinds of test
 
-- **Service unit tests** (`AuthorServiceTest`, `BookServiceTest`) build the service with `new`, passing a real in-memory repository. No Spring context at all, so they run in milliseconds.
+- **Service unit tests** (`AuthorServiceTest`, `BookServiceTest`) build the service without Spring. In this chapter they passed the real in-memory repository; since §5.4 they pass a Mockito mock of the repository interface (`@Mock` + `@InjectMocks`). No Spring context at all, so they run in milliseconds.
 - **Controller slice tests** (`AuthorControllerTest`, `BookControllerTest`) use `@WebMvcTest(XController.class)` with `@MockitoBean XService`: the real MVC stack (routing, JSON, status codes) and a Mockito mock behind it. `@MockitoBean` (Spring Framework 6.2+) replaces Spring Boot's `@MockBean`, which Boot 4 removed.
 
 ```java
@@ -891,8 +891,7 @@ springdoc is not managed by the Spring Boot BOM, so its version (`springdoc.vers
 - `@PathVariable` / `@RequestParam` rely on parameter names compiled into the class (`-parameters`, set by `spring-boot-starter-parent`). Without it you must write `@PathVariable("id")`.
 - Forgetting `@RequestBody` does not fail to compile. Spring then treats the parameter as a `@ModelAttribute` bound from query or form parameters, and the JSON body is ignored.
 - A misspelled JSON field is dropped silently (unknown properties are ignored). The record then gets `null` for a wrapper type, or the request fails with a 400 for a primitive.
-- The in-memory storage is emptied on every restart. That changes in §5.4.
-- The in-memory store is not fully thread-safe. Only the map is concurrent: the service changes stored objects in place, and delete is a check-then-act. Concurrent writes to the same author can interleave (§4.3). §5.6 deals with concurrent writers properly.
+- (Up to §5.4) The in-memory storage was emptied on every restart, and it was not fully thread-safe: only the map was concurrent, the service changed stored objects in place, and delete was a check-then-act (§4.3). A database handles concurrent writers with transactions (§5.6).
 
 ### 5.3 Validation & errors
 
@@ -1076,7 +1075,218 @@ springdoc reads the constraints into the schema. `@NotBlank` fields are listed u
 
 ### 5.4 Persistence with JPA
 
-_Written in Phase 07._
+**What it is.** Authors and books now live in PostgreSQL. The pieces:
+- **Flyway** creates and evolves the schema from hand-written SQL files.
+- **Hibernate** (JPA) maps the tables to the `Author` and `Book` classes.
+- **Spring Data JPA** generates the repositories from interfaces.
+- **Docker Compose support** starts the database on `spring-boot:run`, and **Testcontainers** starts a throwaway one for each test context.
+
+The controllers did not change. The services now use repository interfaces and `@Transactional`.
+
+Where the code is:
+- The entities and repositories in [`author/`](../spring-app/src/main/java/dev/playground/library/author/) and [`book/`](../spring-app/src/main/java/dev/playground/library/book/).
+- [`db/migration/`](../spring-app/src/main/resources/db/migration/) and [`db/demo/`](../spring-app/src/main/resources/db/demo/).
+- [`compose.yaml`](../spring-app/compose.yaml), and the `spring.jpa` keys in `application.yml` / `application-dev.yml`.
+- Tests: `BookRepositoryIT`, `BookControllerIT`, `AuthorControllerIT`, `LibraryApplicationIT`, `DemoDataIT`, plus the Mockito service tests.
+
+Requests: [`http/07-jpa.http`](../spring-app/http/07-jpa.http).
+
+**Why it matters.** Almost every Spring job is Spring Data JPA on a relational database, with Flyway or Liquibase owning the schema. Most JPA surprises come from not knowing when Hibernate actually talks to the database. This section is about exactly that.
+
+#### Three layers: JPA, Hibernate, Spring Data JPA
+
+| Layer | What it is | What you write |
+|---|---|---|
+| **JPA** (Jakarta Persistence) | A specification: annotations (`@Entity`, `@Id`…), the `EntityManager` API, JPQL | The annotations on the entities |
+| **Hibernate ORM** | The implementation Spring Boot uses. It turns entity changes into SQL | Nothing directly; you see it in the SQL log |
+| **Spring Data JPA** | Generates repository classes from interfaces, on top of the `EntityManager` | `interface BookRepository extends JpaRepository<Book, Long>` |
+
+`spring-boot-starter-data-jpa` brings all three, plus the HikariCP connection pool. The `postgresql` JDBC driver is a `runtime` dependency, because the code never imports it.
+
+#### How it starts
+
+```
+./mvnw -pl spring-app spring-boot:run -Dspring-boot.run.profiles=dev
+  │
+  ├─ Docker Compose support finds spring-app/compose.yaml → docker compose up
+  │     └─ postgres:17 starts; on first start the image creates the "library" database
+  │        from POSTGRES_DB (nothing to create by hand)
+  ├─ Boot builds the DataSource from the running compose service (URL, user, password):
+  │     no spring.datasource.* keys anywhere
+  ├─ Flyway: reads flyway_schema_history, applies what is pending
+  │     V1__create_authors_and_books.sql   (versioned, once)
+  │     R__demo_data.sql                   (repeatable, dev profile only)
+  ├─ Hibernate: ddl-auto=validate → every entity must match its table, or startup fails
+  └─ Tomcat on :8080
+```
+
+On shutdown Boot runs `docker compose stop`, but only if it started the services itself; a container that was already running is left alone. The data lives in a named volume, so it survives restarts. `docker compose -f spring-app/compose.yaml down -v` deletes it. A port already in use (another PostgreSQL on 5432) makes the container fail to start: stop the other one or change the host port in `compose.yaml`.
+
+Compose support is a development convenience. `spring-boot-docker-compose` is an optional dependency, so the packaged jar leaves it out. `java -jar` (§3) then needs the connection settings from outside: `SPRING_DATASOURCE_URL=jdbc:postgresql://localhost:5432/library`, plus `SPRING_DATASOURCE_USERNAME` and `SPRING_DATASOURCE_PASSWORD`.
+
+Tests use a different route to the same result:
+
+```
+BookControllerIT starts
+  ├─ @Import(TestcontainersConfiguration) → a PostgreSQLContainer bean → a fresh postgres:17 container
+  ├─ @ServiceConnection → the DataSource points at it
+  ├─ Flyway migrates the empty database (no demo data: db/demo is only on the dev path)
+  ├─ tests run
+  └─ the JVM ends → Testcontainers removes the container
+```
+
+Spring caches test contexts (§5.8), so classes with the same setup (`BookControllerIT` and `AuthorControllerIT`) share one context and one container. Compose support is off in tests by default (`spring.docker.compose.skip.in-tests`).
+
+Boot 3 tutorials use other names for these pieces:
+
+| Boot 4.1 / Testcontainers 2 (this project) | Boot 3 / Testcontainers 1 |
+|---|---|
+| `org.springframework.boot.data.jpa.test.autoconfigure.DataJpaTest`, from `spring-boot-starter-data-jpa-test` | `org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest`, from `spring-boot-starter-test` |
+| `org.springframework.boot.jpa.test.autoconfigure.TestEntityManager` | `org.springframework.boot.test.autoconfigure.orm.jpa.TestEntityManager` |
+| `org.testcontainers.postgresql.PostgreSQLContainer` (not generic) | `org.testcontainers.containers.PostgreSQLContainer<?>` |
+| artifacts `testcontainers-postgresql`, `testcontainers-junit-jupiter` | `postgresql`, `junit-jupiter` (group `org.testcontainers`) |
+| nothing extra: `@DataJpaTest` keeps a `@ServiceConnection` database | often `@AutoConfigureTestDatabase(replace = NONE)`: before Boot 3.4, `@DataJpaTest` swapped any DataSource for an embedded one |
+
+#### Schema strategies
+
+| Strategy | Source of truth | Tooling |
+|---|---|---|
+| **Code first** | The classes; the tool generates migrations from them | EF Core Migrations. Hibernate's `ddl-auto: create`/`update` is the closest thing, but it has no versioned migrations: prototypes only |
+| **Database first** | An existing database; the classes are generated from it | EF `Scaffold-DbContext`. Hibernate Tools or IDE plugins reverse-engineer entities |
+| **Migration first** (this project) | Hand-written SQL migrations; the entities are written to match | **Flyway** (SQL files), or **Liquibase** (XML/YAML/SQL changelogs; it can also diff entities against a database) |
+
+`ddl-auto: validate` connects the two sides. Hibernate does not create anything; it checks at startup that every mapped table and column exists with a compatible type, and fails if not. A misspelled column name is caught at boot, not on the first request. It does not check lengths, constraints or indexes, and it ignores extra columns (the unmapped `created_at`/`updated_at`, filled by the database defaults until §5.5 maps them).
+
+#### Flyway
+
+```
+db/migration/V1__create_authors_and_books.sql   V<version>__<description>.sql
+db/demo/R__demo_data.sql                         R__<description>.sql
+```
+
+- **Versioned** (`V1`, `V2`…) migrations run once, in order. Flyway records each one, with a checksum, in the `flyway_schema_history` table (`LibraryApplicationIT` reads it).
+- **Never edit an applied migration.** The checksum changes and Flyway refuses to start ("migration checksum mismatch"). Write `V2__...` instead. In a playground you can reset with `down -v`; on a shared database you cannot.
+- **Repeatable** (`R__`) migrations run after the versioned ones, and again whenever their checksum changes. So they must be idempotent. The demo script uses `ON CONFLICT (isbn) DO NOTHING` for books, and `WHERE NOT EXISTS` for authors (no natural key to conflict on). `DemoDataIT` runs it twice.
+- `spring.flyway.locations` chooses the folders. `application-dev.yml` adds `classpath:db/demo`, so tests and other profiles never get sample data.
+- Flyway also **validates** the history against the files it can see. After a dev run, the history lists `R__demo_data.sql`, which a run without `dev` cannot see. Flyway's default is then to refuse to start ("Detected applied migration not resolved locally"). `application.yml` sets `spring.flyway.ignore-migration-patterns: "*:future,repeatable:missing"` so both profiles can share the database (`DemoDataIT.aRunWithoutTheDevProfileStillStartsOnThisDatabase`). Setting the property replaces the default `*:future`, so it is listed again.
+- Since Flyway 10, database support is a separate module: `flyway-database-postgresql`, next to `spring-boot-starter-flyway`.
+
+#### Entities — `Author`, `Book`, `BookTest`
+
+```java
+@Entity
+@Table(name = "books")
+public class Book {
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)   // bigserial: the database assigns it
+    private Long id;
+
+    @Column(nullable = false, unique = true, length = 13)  // documentation only, with validate
+    private String isbn;
+
+    private Integer publishedYear;                         // → published_year
+
+    protected Book() {}                                    // for Hibernate (reflection)
+    public Book(String isbn, String title, Integer publishedYear, int totalCopies) { ... }
+    // getters, setters for the mutable fields, no setId
+}
+```
+
+- **Column names** come from Spring Boot's naming strategy: `publishedYear` → `published_year`. Use `@Column(name = ...)` only when the names differ.
+- **A no-argument constructor** (at least `protected`), and the class and its methods **not `final`**. Hibernate instantiates entities by reflection and creates lazy-loading proxies as subclasses (§5.5).
+- **`IDENTITY`** matches `bigserial`: the id is known only after the `INSERT`. So `persist()` runs the INSERT at once instead of waiting for the flush (`BookRepositoryIT.persistMakesTheBookManagedAndAssignsTheId`). The alternative, `SEQUENCE`, lets Hibernate fetch ids ahead and batch inserts.
+- **`equals`/`hashCode` follow the row, not the fields.** Two objects with the same id are the same book, even with different titles in memory. A new entity (id `null`) equals only itself. `hashCode` is a constant, because the id goes from `null` to a value on save. An id-based hash would move the entity to another bucket, and a `HashSet` holding it would lose it (`BookTest.staysInAHashSetWhenTheIdIsAssigned`). Use `instanceof` and `getId()`, not `getClass()` and the field, so that a Hibernate proxy still compares equal.
+- Why not a record? Records are final, immutable and have no no-arg constructor: the opposite of what Hibernate needs. Records stay at the edges, as the DTOs.
+
+#### The persistence context, and when SQL actually runs
+
+The **persistence context** is Hibernate's first-level cache and change tracker, one per transaction. It is the `EntityManager`, which `DbContext` resembles. An entity is in one of four states:
+
+| State | Meaning | How it gets there |
+|---|---|---|
+| **Transient** | A plain object Hibernate knows nothing about | `new Book(...)` |
+| **Managed** | Tracked: Hibernate keeps a snapshot and compares it at flush | `persist`/`save` of a new entity, or loaded by `find`/a query inside a transaction |
+| **Detached** | Was managed, the context is gone (the transaction ended) | The end of the transaction; `em.clear()` / `em.detach()` |
+| **Removed** | Scheduled for `DELETE` at the next flush | `em.remove` / `repository.delete` |
+
+`save()` on an entity that already has an id is a **merge**: Hibernate copies its state onto a managed instance and **returns that one**; the object you passed stays detached. Always use what `save()` returns (`book = repository.save(book)`).
+
+**Dirty checking.** At **flush** time Hibernate compares every managed entity with its snapshot and sends an `UPDATE` for each one that changed. A flush happens at commit, on `em.flush()` / `saveAndFlush`, and before a query that reads a table with pending changes (**auto flush**). So inside a transaction, changing a managed entity *is* the save:
+
+```java
+@Transactional
+public BookResponse update(Long id, UpdateBookRequest request) {
+    Book book = getOrThrow(id);                       // managed until the method returns
+    if (repository.existsByIsbnAndIdNot(isbn13, id))  // check BEFORE changing the entity
+        throw duplicateIsbn(isbn13);
+    BookMapper.apply(request, book);                  // just setters
+    return BookMapper.toResponse(book);               // no save(): UPDATE on commit
+}
+```
+
+Two traps are pinned by tests (each one checked by breaking the code and watching the test fail):
+- **Without `@Transactional` nothing is saved.** Each repository call then runs in its own short transaction, so `book` is already detached when the setters run. The PUT answers 200 with the new values, and the table never changes (`BookControllerIT.createReadUpdateDeleteRoundTrip` catches it).
+- **Auto flush turns the order into a bug.** Apply the changes first, and the `exists` query makes Hibernate flush the `UPDATE` before running the check. The duplicate ISBN then hits the unique constraint: the client gets the generic 409 instead of the service's message (`BookControllerIT.updateOntoAnotherBooksIsbnReturns409FromTheServiceCheck`).
+
+`@Transactional` goes on the service's write methods. §5.6 explains how it works (a proxy), `readOnly`, propagation and rollback rules.
+
+#### Repositories and queries — `BookRepositoryIT`
+
+```java
+public interface BookRepository extends JpaRepository<Book, Long> {
+
+    boolean existsByIsbn(String isbn);                                   // derived
+    boolean existsByIsbnAndIdNot(String isbn, Long id);
+    List<Book> findByTitleContainingIgnoreCase(String title, Sort sort);
+
+    @Query("select b from Book b where b.publishedYear between :from and :to order by b.publishedYear, b.title")
+    List<Book> findPublishedBetween(int from, int to);                    // JPQL
+
+    @Query(value = "select * from books where to_tsvector('english', title) @@ plainto_tsquery('english', :words)"
+            + " order by id", nativeQuery = true)
+    List<Book> searchTitles(String words);                                // native SQL
+}
+```
+
+- **`JpaRepository<Book, Long>`** gives `findAll`, `findAll(Sort)`, `findById`, `save`, `saveAndFlush`, `existsById`, `deleteById`, `count`… Spring Data generates the class at startup. Its methods are transactional on their own (read-only for reads).
+- **Derived queries** are parsed from the method name: `findBy`/`existsBy`/`countBy`/`deleteBy`, then properties joined by `And`/`Or`, with keywords (`ContainingIgnoreCase`, `Between`, `Not`, `OrderByTitleAsc`…). A misspelled property fails at startup. Past two or three conditions the names get unreadable: switch to `@Query`.
+- **JPQL** queries entities and fields (`Book`, `publishedYear`), not tables and columns, and Hibernate checks it at startup. `:from` binds to the parameter named `from`: this works because the code is compiled with `-parameters`; otherwise add `@Param("from")`.
+- **Native SQL** (`nativeQuery = true`) is for what JPQL cannot say. Here that is PostgreSQL full-text search, where `"dunes"` finds *Dune* through stemming. It ties the query to PostgreSQL and is only checked when it runs, which is one more reason these tests use a real PostgreSQL and not H2.
+- A `Sort` parameter adds `order by`. `GET /api/books?title=` uses the derived query, and paging arrives in §5.5.
+
+`@DataJpaTest` is the JPA slice: entities, repositories, Flyway and a `TestEntityManager`, with no web layer and no services. Each test runs in a transaction that is **rolled back** at the end, so the tests do not see each other's rows. The full-stack `*ControllerIT` tests go through MockMvc and the service's own transactions. They commit for real, so they empty the tables in `@BeforeEach`.
+
+#### Errors
+
+The service checks the rules first (`existsByIsbn` → `ConflictException` → 409 with a precise message). Two requests can still pass the same check at the same moment. The database's unique constraint then rejects the second `INSERT`, and Spring translates the driver's exception into `DataIntegrityViolationException`. `GlobalExceptionHandler` maps that to a 409 with a generic detail, and the log keeps the constraint name (`GlobalExceptionHandlerTest.dataIntegrityViolationIs409WithoutTheSql`).
+
+That translation turns every vendor's `SQLException`s into Spring's one `DataAccessException` hierarchy. It happens in two places, with nothing to annotate:
+- **Spring Data's repository proxies** translate what a repository call throws. A hand-written DAO gets the same by carrying `@Repository`.
+- **`JpaTransactionManager`** translates what fails at commit. A concurrent update, for example, only reaches the database at the flush on commit.
+
+The same exception also covers `NOT NULL`, `CHECK` and "value too long" violations. Those should not happen here, because validation (§5.3) rejects such input first. If a bug lets one through, the client gets a 409 and the log shows the constraint. A stricter handler would answer 409 only for unique violations (SQLState `23505`, the driver's code for them) and 500 for the rest.
+
+#### Configuration
+
+```yaml
+spring:
+  jpa:
+    hibernate:
+      ddl-auto: validate      # Flyway owns the schema
+    open-in-view: false
+```
+
+- **`open-in-view: false`.** Spring Boot's default is `true`: the persistence context stays open until the HTTP response is written. Lazy relations (§5.5) then load silently from the controller or the JSON serializer, firing extra queries outside any transaction. Boot even logs a warning about it at startup. Off, data access stays in the services, and a missing fetch fails loudly with `LazyInitializationException` (§5.5).
+- **Seeing the SQL** (dev profile): `logging.level.org.hibernate.SQL: DEBUG` logs every statement, `org.hibernate.orm.jdbc.bind: TRACE` logs the parameter values, and `hibernate.format_sql: true` indents them. Prefer these over `spring.jpa.show-sql`, which prints to stdout and bypasses the logger.
+
+**Gotchas**
+- **`save()` on a managed entity is redundant**, and forgetting `@Transactional` makes a missing `save()` lose the change silently (above).
+- **`ddl-auto: update` in real projects.** It never drops or renames anything, it has no history, and two developers get two different schemas. Keep it off; write a migration.
+- **Editing `V1__...sql` after it ran** fails the next startup with a checksum mismatch. Add a new version.
+- **H2 is not PostgreSQL.** Native queries, `ON CONFLICT`, `timestamptz` and the constraint names differ. Tests that pass on an in-memory database can fail in production, which is why Testcontainers exists.
+- **Lombok's `@Data` on an entity** generates field-based `equals`/`hashCode`/`toString`. That breaks sets, and with relations (§5.5) it can recurse forever or trigger lazy loads. Write them by hand as above.
+- **`IDENTITY` disables JDBC insert batching** in Hibernate. That does not matter here; it matters for bulk imports.
+- **Docker must be running** for `spring-boot:run` and for every `*IT` test. `./mvnw test` (unit and slice tests) still runs without it.
 
 ### 5.5 Advanced JPA
 
@@ -1116,6 +1326,7 @@ _Written in Phase 13._
 - Maven: [Maven in 5 minutes](https://maven.apache.org/guides/getting-started/maven-in-five-minutes.html), [lifecycle reference](https://maven.apache.org/guides/introduction/introduction-to-the-lifecycle.html)
 - Spring Boot: [reference docs](https://docs.spring.io/spring-boot/index.html), [start.spring.io](https://start.spring.io)
 - Spring Framework: [reference docs](https://docs.spring.io/spring-framework/reference/)
+- Persistence: [Spring Data JPA reference](https://docs.spring.io/spring-data/jpa/reference/) (query method keywords), [Hibernate ORM documentation](https://hibernate.org/orm/documentation/), [Flyway documentation](https://documentation.red-gate.com/flyway), [Testcontainers for Java](https://java.testcontainers.org/)
 
 ---
 
@@ -1201,6 +1412,19 @@ A map for orientation, not a claim that the pieces are identical. It grows with 
 | `ProblemDetails`, `Results.Problem(...)` | `ProblemDetail.forStatusAndDetail(...)` | RFC 9457 in both |
 | `UseExceptionHandler` / `IExceptionHandler` / exception filters | `@RestControllerAdvice` + `@ExceptionHandler` | |
 | `services.AddOptions<T>().ValidateDataAnnotations().ValidateOnStart()` | `@Validated` on a `@ConfigurationProperties` class | The bean is validated when it is created, which is at startup; there is no separate `ValidateOnStart` step |
+| EF Core | JPA (the spec) + Hibernate (the implementation) + Spring Data JPA (repositories) | Three layers where .NET has one library |
+| `DbContext` | `EntityManager` / the persistence context | One per transaction; you rarely touch it directly, the repositories do |
+| `DbSet<Book>` + your own repository class | `interface BookRepository extends JpaRepository<Book, Long>` | Spring Data writes the implementation |
+| LINQ to Entities (`Where`, `OrderBy`…) | Derived queries (`findByTitleContainingIgnoreCase`), JPQL `@Query`, Specifications | No compiler-checked query language; derived names and JPQL are checked at startup |
+| `FromSqlRaw` / `FromSql` | `@Query(nativeQuery = true)` | |
+| Change tracking + `SaveChanges()` | Dirty checking + flush on commit | No explicit save call: the end of the `@Transactional` method writes the changes |
+| `AsNoTracking()` | Detached entities, read-only transactions, projections (§5.5, §5.6) | |
+| EF Migrations (code first, generated from the model) | Flyway (hand-written SQL files) | `__EFMigrationsHistory` ↔ `flyway_schema_history` |
+| `Database.EnsureCreated()` | `spring.jpa.hibernate.ddl-auto: create` | Prototypes only in both. Not the same: `create` drops and recreates the schema on every start, losing the data, while `EnsureCreated` leaves an existing database alone |
+| `Scaffold-DbContext` (database first) | Hibernate Tools / IDE reverse engineering | |
+| Connection string in `appsettings.json` | `spring.datasource.*`, or none: Docker Compose support / `@ServiceConnection` | |
+| .NET Aspire / Testcontainers for .NET | `spring-boot-docker-compose` / Testcontainers for Java | The Java Testcontainers is the original |
+| `DbUpdateException` (unique index violation) | `DataIntegrityViolationException` | Spring translates every vendor's SQL errors into one `DataAccessException` hierarchy |
 
 **LINQ ↔ Streams**
 
@@ -1242,3 +1466,7 @@ A map for orientation, not a claim that the pieces are identical. It grows with 
 - **Validation is opt-in per parameter.** `[ApiController]` validates every bound model and answers 400 by itself. In Spring, a `@RequestBody` without `@Valid` is never validated, whatever constraints its record carries.
 - **Validation messages follow the locale.** Spring hands Hibernate Validator the request's `Accept-Language`, or else the machine's locale, and the built-in messages are translated to it. On a Spanish Windows machine you get `"no debe estar vacío"` unless the locale is pinned (§5.3).
 - **A missing `int` in the JSON is a 400.** System.Text.Json leaves a missing value-type property at its default (`0`). Jackson 3 rejects a missing or `null` primitive. Use `Integer` for optional numbers.
+- **There is no `SaveChanges()`.** Changes to a managed entity are written when the transaction commits. Without `@Transactional` on the service method there is no transaction to commit, and the change is lost without an error (§5.4).
+- **Hibernate may write before you expect.** Before a query, it flushes pending changes to the tables that query reads (auto flush). EF only writes on `SaveChanges()`. Run your checks before you change the entity (§5.4).
+- **Entity `equals`/`hashCode`.** EF tracks entities by reference and rarely cares. JPA code relies on them wherever entities sit in sets and collections (the relations of §5.5), and field-based ones (Lombok's `@Data`, a record) break. Compare by id, and return a constant hash code (§5.4).
+- **The schema is not generated from the classes.** Flyway runs your SQL; Hibernate only validates. Adding a field to an entity means writing a migration too, or the app does not start.

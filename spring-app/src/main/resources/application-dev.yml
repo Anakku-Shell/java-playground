@@ -4,6 +4,19 @@
 library:
   name: Playground Library (dev)
 
+spring:
+  # db/demo holds a repeatable migration with sample data. It is on the Flyway path only here, so
+  # tests and other profiles never get it. Guide: §5.4.
+  flyway:
+    locations: classpath:db/migration,classpath:db/demo
+  jpa:
+    properties:
+      hibernate:
+        format_sql: true
+
 logging:
   level:
     dev.playground: DEBUG
+    # Every SQL statement Hibernate sends, and (TRACE) the values bound to its ? parameters.
+    org.hibernate.SQL: DEBUG
+    org.hibernate.orm.jdbc.bind: TRACE

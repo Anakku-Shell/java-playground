@@ -36,9 +36,22 @@ class BookControllerTest {
 
     @Test
     void listReturnsAllBooks() {
-        given(service.findAll()).willReturn(List.of(DUNE));
+        given(service.findAll(null)).willReturn(List.of(DUNE));
 
         assertThat(mvc.get().uri("/api/books"))
+                .hasStatusOk()
+                .bodyJson()
+                .extractingPath("$[*].title")
+                .asArray()
+                .containsExactly("Dune");
+    }
+
+    @Test
+    void listFiltersByTitle() {
+        // An optional query parameter: GET /api/books?title=dune. Absent, it arrives as null.
+        given(service.findAll("dune")).willReturn(List.of(DUNE));
+
+        assertThat(mvc.get().uri("/api/books").queryParam("title", "dune"))
                 .hasStatusOk()
                 .bodyJson()
                 .extractingPath("$[*].title")

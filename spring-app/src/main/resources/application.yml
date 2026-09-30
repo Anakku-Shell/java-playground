@@ -9,6 +9,22 @@ spring:
   web:
     locale: en
     locale-resolver: fixed
+  # No datasource URL here: on spring-boot:run it comes from compose.yaml (Docker Compose support),
+  # in tests from the Testcontainers container (@ServiceConnection). Guide: §5.4.
+  jpa:
+    hibernate:
+      # Flyway owns the schema. Hibernate only checks at startup that every entity matches a table
+      # and its columns, and fails fast if not. Never create/update outside a throwaway prototype.
+      ddl-auto: validate
+    # On by default: keeps the persistence context open for the whole web request, so lazy loading
+    # "works" in controllers while firing hidden queries there. Off, and data is loaded in the
+    # service layer on purpose (§5.5 shows the LazyInitializationException this exposes).
+    open-in-view: false
+  flyway:
+    # After a dev run, flyway_schema_history lists R__demo_data, which other profiles cannot see
+    # (db/demo is only on the dev path). Flyway would refuse to start ("applied migration not
+    # resolved locally"). Ignore a missing repeatable; keep the default for future versions.
+    ignore-migration-patterns: "*:future,repeatable:missing"
 
 server:
   port: 8080

@@ -1,0 +1,46 @@
+### Guide §5.4 Persistence with JPA. VS Code REST Client syntax: click "Send Request" above each request.
+### Start the app with the dev profile, which loads the demo data (5 authors, 10 books):
+###   ./mvnw -pl spring-app spring-boot:run -Dspring-boot.run.profiles=dev
+### Docker Desktop must be running: Spring Boot starts PostgreSQL from compose.yaml. The console shows
+### every SQL statement Hibernate sends, with its parameter values. The ids (Dune is 1) assume the
+### demo data on an empty database: reset it with docker compose -f spring-app/compose.yaml down -v
+
+@host = http://localhost:8080
+
+### The demo books, ordered by id (200, 10 books). SQL: select ... from books order by id
+GET {{host}}/api/books
+
+### Title filter, any case (200: Dune, Dune Messiah). SQL: ... where upper(title) like upper(?) escape ...
+GET {{host}}/api/books?title=DUNE
+
+### A new book (201). SQL: the exists check (select b1_0.id from books b1_0 where b1_0.isbn=?
+### fetch first ? rows only), then insert into books ... (the generated id comes back with it)
+POST {{host}}/api/books
+Content-Type: application/json
+
+{"isbn": "9780547928227", "title": "The Hobbit", "publishedYear": 1937, "totalCopies": 2}
+
+### The same ISBN again (409, detail "A book with ISBN 9780547928227 already exists")
+POST {{host}}/api/books
+Content-Type: application/json
+
+{"isbn": "9780547928227", "title": "The Hobbit (again)", "publishedYear": 1937, "totalCopies": 1}
+
+### Update Dune (200). SQL: a select, the exists check, then the UPDATE on commit: dirty checking,
+### the service never calls save()
+PUT {{host}}/api/books/1
+Content-Type: application/json
+
+{"isbn": "9780441013593", "title": "Dune", "publishedYear": 1965, "totalCopies": 5}
+
+### Stop the app (Ctrl+C) and start it again: the data is still there (200, Dune has totalCopies 5)
+GET {{host}}/api/books/1
+
+### Emma's ISBN for Dune (409, from the service check; nothing is written)
+PUT {{host}}/api/books/1
+Content-Type: application/json
+
+{"isbn": "9780141439587", "title": "Dune", "publishedYear": 1965, "totalCopies": 5}
+
+### The authors (200, 5 demo authors)
+GET {{host}}/api/authors

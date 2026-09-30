@@ -20,7 +20,7 @@ concept's code updates its guide section.
 - Errors are `ProblemDetail`. The schema changes only through Flyway (`ddl-auto: validate`).
 - Logging with SLF4J (`LoggerFactory.getLogger`), never `System.out` in `spring-app`.
 - No Lombok or MapStruct in main code (only in the labelled legacy examples).
-- Tests: `*Test` = unit/slice (no Docker); `*IT` = full context + Testcontainers (Failsafe). AssertJ assertions.
+- Tests: `*Test` = unit/slice with no Docker (Surefire, `./mvnw test`); `*IT` = anything that needs Docker: a full context or a `@DataJpaTest` slice on Testcontainers PostgreSQL, via `@Import(TestcontainersConfiguration.class)` (Failsafe, `./mvnw verify`). AssertJ assertions.
 - Spring Boot 4 splits starters per technology (`spring-boot-starter-webmvc`, `...-webmvc-test`, `...-flyway`…). Check start.spring.io for the exact artifact before adding one.
 
 ## Commands
@@ -32,7 +32,7 @@ concept's code updates its guide section.
 ./mvnw -pl java-core test -Dtest=RecordsTest   # one test class
 ```
 
-- Docker Desktop must be running for `spring-boot:run` and the `*IT` tests once PostgreSQL is in (chapter 07).
+- Docker Desktop must be running for `spring-boot:run` (it starts `spring-app/compose.yaml`) and for the `*IT` tests. `-Dspring-boot.run.profiles=dev` adds the demo data (`db/demo`) and SQL logging.
 - If `java` is not on PATH, set `JAVA_HOME` to the Temurin 25 install folder.
 
 ## Git

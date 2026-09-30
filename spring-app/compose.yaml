@@ -1,0 +1,21 @@
+# The development database. Spring Boot's Docker Compose support (spring-boot-docker-compose)
+# runs `docker compose up` on spring-boot:run, reads this file and builds the DataSource from it:
+# no URL, user or password in application.yml. Tests do not use it (they use Testcontainers).
+# The image creates the `library` database from POSTGRES_DB on first start.
+# Reset all data: docker compose -f spring-app/compose.yaml down -v
+# Guide: §5.4 Persistence with JPA.
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: library
+      POSTGRES_USER: library
+      POSTGRES_PASSWORD: library
+    ports:
+      - "5432:5432"
+    volumes:
+      # A named volume, so the data survives `docker compose down` (but not `down -v`).
+      - library-data:/var/lib/postgresql/data
+
+volumes:
+  library-data:

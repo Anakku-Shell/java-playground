@@ -22,7 +22,10 @@ Maven does **not** need to be installed: the Maven Wrapper (`mvnw`) downloads th
 ```bash
 ./mvnw verify                          # build both modules and run all the checks
 ./mvnw -pl spring-app spring-boot:run  # start the API on http://localhost:8080
+./mvnw -pl spring-app spring-boot:run -Dspring-boot.run.profiles=dev   # same, with demo data and SQL logging
 ```
+
+With Docker Desktop running, `spring-boot:run` starts PostgreSQL by itself (`spring-app/compose.yaml`), and `verify` runs the integration tests on throwaway containers. `docker compose -f spring-app/compose.yaml down -v` deletes the local data.
 
 On PowerShell, use `.\mvnw` instead of `./mvnw`.
 

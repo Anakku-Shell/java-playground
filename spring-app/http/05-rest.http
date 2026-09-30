@@ -1,6 +1,7 @@
 ### Guide §5.2 REST API. VS Code REST Client syntax: click "Send Request" above each request.
-### The app must be running on :8080. Storage is in memory, so a restart empties it and the ids
-### below (1) assume a freshly started app.
+### The app must be running on :8080 without the dev profile. The ids below (1) assume an empty
+### database. Since §5.4 the data survives restarts: reset it with
+### docker compose -f spring-app/compose.yaml down -v
 
 @host = http://localhost:8080
 

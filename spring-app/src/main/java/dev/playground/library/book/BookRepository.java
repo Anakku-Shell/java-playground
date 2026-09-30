@@ -1,55 +1,37 @@
 package dev.playground.library.book;
 
-import java.util.Comparator;
 import java.util.List;
-import java.util.Map;
-import java.util.Optional;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicLong;
-import org.springframework.stereotype.Repository;
+import org.springframework.data.domain.Sort;
+import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Query;
 
 /**
- * In-memory storage until §5.4. Same shape, and the same concurrency caveats, as
- * {@code AuthorRepository}. Guide: §5.2 REST API.
+ * A Spring Data repository: only an interface. At startup Spring Data generates the
+ * implementation. {@code JpaRepository} brings {@code findAll}, {@code findById}, {@code save},
+ * {@code deleteById}... and every other method below becomes a query, in one of three ways.
+ * Guide: §5.4 Persistence with JPA.
  */
-@Repository
-public class BookRepository {
+public interface BookRepository extends JpaRepository<Book, Long> {
 
-    private final Map<Long, Book> books = new ConcurrentHashMap<>();
-    private final AtomicLong nextId = new AtomicLong(1);
+    // 1. Derived queries: the query is parsed from the method name. ISBNs are in the canonical
+    // 13-digit form (Isbn.toIsbn13).
+    boolean existsByIsbn(String isbn);
 
-    public List<Book> findAll() {
-        return books.values().stream().sorted(Comparator.comparing(Book::getId)).toList();
-    }
+    /** Does a book other than {@code id} have this ISBN? For updates. */
+    boolean existsByIsbnAndIdNot(String isbn, Long id);
 
-    public Optional<Book> findById(Long id) {
-        return Optional.ofNullable(books.get(id));
-    }
+    List<Book> findByTitleContainingIgnoreCase(String title, Sort sort);
 
-    /** Inserts when the id is null (assigning a new one), replaces otherwise. */
-    public Book save(Book book) {
-        if (book.getId() == null) {
-            book.setId(nextId.getAndIncrement());
-        }
-        books.put(book.getId(), book);
-        return book;
-    }
+    // 2. JPQL: queries on entities and fields (Book, publishedYear), not tables and columns.
+    // :from and :to bind to the parameters by name (compiled with -parameters).
+    @Query("select b from Book b where b.publishedYear between :from and :to order by b.publishedYear, b.title")
+    List<Book> findPublishedBetween(int from, int to);
 
-    /**
-     * Expects the canonical 13-digit form ({@link Isbn#toIsbn13}). Spring Data derives the same query
-     * from the method name alone (§5.4).
-     */
-    public Optional<Book> findByIsbn(String isbn) {
-        return books.values().stream()
-                .filter(book -> book.getIsbn().equals(isbn))
-                .findFirst();
-    }
-
-    public boolean existsById(Long id) {
-        return books.containsKey(id);
-    }
-
-    public void deleteById(Long id) {
-        books.remove(id);
-    }
+    // 3. Native SQL, for what JPQL cannot express: here PostgreSQL full-text search, which matches
+    // word stems ("dunes" finds "Dune"). Tied to PostgreSQL, and not checked at startup.
+    @Query(
+            value = "select * from books where to_tsvector('english', title) @@ plainto_tsquery('english', :words)"
+                    + " order by id",
+            nativeQuery = true)
+    List<Book> searchTitles(String words);
 }

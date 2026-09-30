@@ -1,5 +1,6 @@
 ### Guide §5.3 Validation & errors. VS Code REST Client syntax: click "Send Request" above each request.
-### The app must be running on :8080, freshly started (storage is in memory; the ids assume that).
+### The app must be running on :8080 without the dev profile, on an empty database (the ids assume
+### it). Since §5.4 the data survives restarts: reset it with docker compose -f spring-app/compose.yaml down -v
 ### Every error response is a ProblemDetail: Content-Type application/problem+json.
 
 @host = http://localhost:8080

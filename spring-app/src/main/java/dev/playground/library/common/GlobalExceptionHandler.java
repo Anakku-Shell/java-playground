@@ -9,6 +9,7 @@ import java.util.Objects;
 import java.util.TreeMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.HttpStatusCode;
@@ -45,6 +46,19 @@ public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
     @ExceptionHandler(ConflictException.class)
     public ProblemDetail handleConflict(ConflictException ex) {
         return ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, ex.getMessage());
+    }
+
+    /**
+     * A database constraint rejected a write (unique, foreign key, check). The services check the
+     * rules first, so this is mostly the race they cannot see: two requests passing the same check
+     * at once (§5.4). The message holds SQL and constraint names, so it goes to the log only. NOT
+     * NULL, CHECK and length violations land here too; validation (§5.3) should stop those first, so
+     * one showing up in the log is a bug to fix, even though the client sees a 409.
+     */
+    @ExceptionHandler(DataIntegrityViolationException.class)
+    public ProblemDetail handleDataIntegrityViolation(DataIntegrityViolationException ex) {
+        log.warn("Constraint violation: {}", ex.getMostSpecificCause().getMessage());
+        return ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, "The request conflicts with existing data.");
     }
 
     @ExceptionHandler(ExternalServiceException.class)

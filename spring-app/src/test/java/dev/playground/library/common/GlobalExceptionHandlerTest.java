@@ -14,6 +14,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.assertj.MockMvcTester;
@@ -65,6 +66,25 @@ class GlobalExceptionHandlerTest {
                 .bodyJson()
                 .extractingPath("$.detail")
                 .isEqualTo("Thing already exists");
+    }
+
+    @Test
+    void dataIntegrityViolationIs409WithoutTheSql(CapturedOutput output) {
+        // The safety net for races the service checks cannot see: two requests insert the same ISBN
+        // at once, both pass existsByIsbn, and the unique constraint rejects the second INSERT.
+        assertThat(mvc.post().uri("/things/race"))
+                .hasStatus(HttpStatus.CONFLICT)
+                .bodyJson()
+                .isStrictlyEqualTo("""
+                        {
+                          "title": "Conflict",
+                          "status": 409,
+                          "detail": "The request conflicts with existing data.",
+                          "instance": "/things/race"
+                        }
+                        """);
+        // The body says nothing about tables or constraints; the log names them.
+        assertThat(output).contains("WARN").contains("books_isbn_key");
     }
 
     @Test
@@ -198,6 +218,13 @@ class GlobalExceptionHandlerTest {
         @PostMapping("/things/conflict")
         void conflict() {
             throw new ConflictException("Thing already exists");
+        }
+
+        @PostMapping("/things/race")
+        void race() {
+            throw new DataIntegrityViolationException(
+                    "could not execute statement [ERROR: duplicate key value violates unique constraint"
+                            + " \"books_isbn_key\"]");
         }
 
         @GetMapping("/things/external")
