@@ -3,6 +3,12 @@
 spring:
   application:
     name: library
+  # One language for every message. Without this, Spring passes the request's locale
+  # (Accept-Language, else the JVM's) to Hibernate Validator, which translates its built-in messages,
+  # while our custom ones exist only in English. Guide: §5.3.
+  web:
+    locale: en
+    locale-resolver: fixed
 
 server:
   port: 8080

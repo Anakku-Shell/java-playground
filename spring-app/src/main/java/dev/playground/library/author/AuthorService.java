@@ -3,10 +3,9 @@ package dev.playground.library.author;
 import dev.playground.library.author.dto.AuthorResponse;
 import dev.playground.library.author.dto.CreateAuthorRequest;
 import dev.playground.library.author.dto.UpdateAuthorRequest;
+import dev.playground.library.common.NotFoundException;
 import java.util.List;
-import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
-import org.springframework.web.server.ResponseStatusException;
 
 /**
  * Author use cases. Takes and returns DTOs, so the controller never touches {@link Author}. The
@@ -41,18 +40,12 @@ public class AuthorService {
 
     public void delete(Long id) {
         if (!repository.existsById(id)) {
-            throw notFound(id);
+            throw new NotFoundException("Author", id);
         }
         repository.deleteById(id);
     }
 
     private Author getOrThrow(Long id) {
-        return repository.findById(id).orElseThrow(() -> notFound(id));
-    }
-
-    // Temporary: ResponseStatusException couples the service to HTTP. §5.3 replaces it with a
-    // NotFoundException that a global handler turns into a 404 ProblemDetail.
-    private static ResponseStatusException notFound(Long id) {
-        return new ResponseStatusException(HttpStatus.NOT_FOUND, "Author " + id + " not found");
+        return repository.findById(id).orElseThrow(() -> new NotFoundException("Author", id));
     }
 }

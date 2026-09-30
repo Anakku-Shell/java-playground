@@ -35,6 +35,16 @@ public class BookRepository {
         return book;
     }
 
+    /**
+     * Expects the canonical 13-digit form ({@link Isbn#toIsbn13}). Spring Data derives the same query
+     * from the method name alone (§5.4).
+     */
+    public Optional<Book> findByIsbn(String isbn) {
+        return books.values().stream()
+                .filter(book -> book.getIsbn().equals(isbn))
+                .findFirst();
+    }
+
     public boolean existsById(Long id) {
         return books.containsKey(id);
     }

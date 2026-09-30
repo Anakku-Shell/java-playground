@@ -3,6 +3,8 @@ package dev.playground.library.author;
 import dev.playground.library.author.dto.AuthorResponse;
 import dev.playground.library.author.dto.CreateAuthorRequest;
 import dev.playground.library.author.dto.UpdateAuthorRequest;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.Positive;
 import java.net.URI;
 import java.util.List;
 import org.springframework.http.HttpStatus;
@@ -20,7 +22,9 @@ import org.springframework.web.servlet.support.ServletUriComponentsBuilder;
 
 /**
  * HTTP only: maps requests to service calls and picks the status codes. No business rules here.
- * Guide: §5.2 REST API.
+ * {@code @Valid} checks a request body against its record's constraints before the method runs;
+ * {@code @Positive} on a path variable turns on Spring's built-in method validation (§5.3).
+ * Errors become ProblemDetails in {@code GlobalExceptionHandler}. Guide: §5.2 REST API.
  */
 @RestController
 @RequestMapping("/api/authors")
@@ -38,13 +42,13 @@ public class AuthorController {
     }
 
     @GetMapping("/{id}")
-    public AuthorResponse get(@PathVariable Long id) {
+    public AuthorResponse get(@PathVariable @Positive Long id) {
         return service.findById(id);
     }
 
     /** 201 Created with a Location header pointing at the new resource. */
     @PostMapping
-    public ResponseEntity<AuthorResponse> create(@RequestBody CreateAuthorRequest request) {
+    public ResponseEntity<AuthorResponse> create(@Valid @RequestBody CreateAuthorRequest request) {
         AuthorResponse created = service.create(request);
         URI location = ServletUriComponentsBuilder.fromCurrentRequest()
                 .path("/{id}")
@@ -54,13 +58,13 @@ public class AuthorController {
     }
 
     @PutMapping("/{id}")
-    public AuthorResponse update(@PathVariable Long id, @RequestBody UpdateAuthorRequest request) {
+    public AuthorResponse update(@PathVariable @Positive Long id, @Valid @RequestBody UpdateAuthorRequest request) {
         return service.update(id, request);
     }
 
     @DeleteMapping("/{id}")
     @ResponseStatus(HttpStatus.NO_CONTENT)
-    public void delete(@PathVariable Long id) {
+    public void delete(@PathVariable @Positive Long id) {
         service.delete(id);
     }
 }

@@ -6,11 +6,14 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.BDDMockito.given;
 import static org.mockito.BDDMockito.willThrow;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 
 import dev.playground.library.author.dto.AuthorResponse;
 import dev.playground.library.author.dto.CreateAuthorRequest;
 import dev.playground.library.author.dto.UpdateAuthorRequest;
+import dev.playground.library.common.NotFoundException;
 import java.util.List;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
@@ -18,7 +21,6 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.assertj.MockMvcTester;
-import org.springframework.web.server.ResponseStatusException;
 
 /**
  * The HTTP contract of {@link AuthorController}: paths, status codes, headers and JSON. The service
@@ -65,10 +67,22 @@ class AuthorControllerTest {
 
     @Test
     void getMissingIs404() {
-        given(service.findById(99L))
-                .willThrow(new ResponseStatusException(HttpStatus.NOT_FOUND, "Author 99 not found"));
+        given(service.findById(99L)).willThrow(new NotFoundException("Author", 99L));
 
-        assertThat(mvc.get().uri("/api/authors/99")).hasStatus(HttpStatus.NOT_FOUND);
+        // The service throws a domain exception; GlobalExceptionHandler (picked up by @WebMvcTest,
+        // like every @ControllerAdvice) writes the ProblemDetail.
+        assertThat(mvc.get().uri("/api/authors/99"))
+                .hasStatus(HttpStatus.NOT_FOUND)
+                .hasContentType(MediaType.APPLICATION_PROBLEM_JSON)
+                .bodyJson()
+                .isStrictlyEqualTo("""
+                        {
+                          "title": "Not Found",
+                          "status": 404,
+                          "detail": "Author 99 not found",
+                          "instance": "/api/authors/99"
+                        }
+                        """);
     }
 
     @Test
@@ -118,9 +132,7 @@ class AuthorControllerTest {
 
     @Test
     void deleteMissingIs404() {
-        willThrow(new ResponseStatusException(HttpStatus.NOT_FOUND))
-                .given(service)
-                .delete(99L);
+        willThrow(new NotFoundException("Author", 99L)).given(service).delete(99L);
 
         assertThat(mvc.delete().uri("/api/authors/99")).hasStatus(HttpStatus.NOT_FOUND);
     }
@@ -140,5 +152,85 @@ class AuthorControllerTest {
                                 """))
                 .hasStatus(HttpStatus.CREATED);
         verify(service).create(new CreateAuthorRequest("Mary Beard", null));
+    }
+
+    @Test
+    void blankNameIs400WithAFieldError() {
+        assertThat(mvc.post()
+                        .uri("/api/authors")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"name": "  ", "birthYear": 1934}
+                                """))
+                .hasStatus(HttpStatus.BAD_REQUEST)
+                .hasContentType(MediaType.APPLICATION_PROBLEM_JSON)
+                .bodyJson()
+                .extractingPath("$.errors")
+                .isEqualTo(Map.of("name", List.of("must not be blank")));
+        // @Valid runs before the method: the service is never called with invalid data.
+        verifyNoInteractions(service);
+    }
+
+    @Test
+    void messagesAreEnglishWhateverTheClientLocale() {
+        // Spring passes the request locale (Accept-Language, else the JVM default: Spanish on a
+        // Spanish Windows) to Hibernate Validator, which translates its built-in messages. Our custom
+        // messages exist only in English, so application.yml pins the locale and every message matches.
+        assertThat(mvc.post()
+                        .uri("/api/authors")
+                        .header("Accept-Language", "es")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"name": ""}
+                                """))
+                .hasStatus(HttpStatus.BAD_REQUEST)
+                .bodyJson()
+                .extractingPath("$.errors.name")
+                .asArray()
+                .containsExactly("must not be blank");
+    }
+
+    @Test
+    void birthYearInTheFutureIs400() {
+        assertThat(mvc.post()
+                        .uri("/api/authors")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"name": "Time Traveller", "birthYear": 3000}
+                                """))
+                .hasStatus(HttpStatus.BAD_REQUEST)
+                .bodyJson()
+                .extractingPath("$.errors.birthYear")
+                .asArray()
+                .containsExactly("must be a year between 0 and the current year");
+        verifyNoInteractions(service);
+    }
+
+    @Test
+    void nonPositiveIdIs400() {
+        assertThat(mvc.get().uri("/api/authors/0"))
+                .hasStatus(HttpStatus.BAD_REQUEST)
+                .bodyJson()
+                .extractingPath("$.errors")
+                .isEqualTo(Map.of("id", List.of("must be greater than 0")));
+        verifyNoInteractions(service);
+    }
+
+    @Test
+    void updateWithAnInvalidBodyReportsTheFieldErrors() {
+        // The id carries @Positive, so method validation checks the body too and throws
+        // HandlerMethodValidationException instead of MethodArgumentNotValidException. The client
+        // sees the same "errors" shape either way.
+        assertThat(mvc.put()
+                        .uri("/api/authors/7")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"name": ""}
+                                """))
+                .hasStatus(HttpStatus.BAD_REQUEST)
+                .bodyJson()
+                .extractingPath("$.errors")
+                .isEqualTo(Map.of("name", List.of("must not be blank")));
+        verifyNoInteractions(service);
     }
 }

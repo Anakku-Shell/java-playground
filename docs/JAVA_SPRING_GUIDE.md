@@ -235,7 +235,12 @@ Spring Boot inverts this: **your app owns `main()` and starts an embedded Tomcat
 
 ### Where the playground is right now
 
-`LibraryApplication` starts and Tomcat listens on port 8080. It serves `/api/info` (§5.1), CRUD for `/api/authors` and `/api/books` kept in memory (§5.2), and Swagger UI at `/swagger-ui.html`. `LibraryApplicationTest` (`@SpringBootTest`) boots the same context in a test, so a broken configuration fails the build.
+`LibraryApplication` starts and Tomcat listens on port 8080. It serves:
+- `/api/info` (§5.1);
+- CRUD for `/api/authors` and `/api/books`, kept in memory (§5.2);
+- Swagger UI at `/swagger-ui.html`.
+
+Request bodies are validated, and every error is an RFC 9457 `ProblemDetail` (§5.3). `LibraryApplicationTest` (`@SpringBootTest`) boots the same context in a test, so a broken configuration fails the build.
 
 ---
 
@@ -829,9 +834,9 @@ Return a plain object for `200 OK`. Use `ResponseEntity<T>` when you need to set
 | `PUT` (full replacement) | `200` + the updated resource |
 | `DELETE` | `204 No Content` |
 
-**For now, a missing id** is a `ResponseStatusException(HttpStatus.NOT_FOUND, "Book 7 not found")` thrown by the service. It works, but the service now knows about HTTP, and the response body is Spring Boot's generic error JSON (`timestamp`, `status`, `error`, `path`), without the message. §5.3 replaces both with a domain exception and a `ProblemDetail`.
+**A missing id** makes the service throw `NotFoundException("Book", 7)`, which `GlobalExceptionHandler` turns into a 404 `ProblemDetail` (§5.3). The first version of this chapter threw `ResponseStatusException(HttpStatus.NOT_FOUND, "Book 7 not found")` from the service. You will meet that in other codebases: it works, but it ties the service to HTTP, and without a handler the body is Spring Boot's generic error JSON (`timestamp`, `status`, `error`, `path`), without the message.
 
-Spring answers some errors **before your method runs**; the controller tests pin them (each also checks that the service was never called):
+Spring answers some errors **before your method runs**; the controller tests pin them (each also checks that the service was never called). Since §5.3 each of these errors is a `ProblemDetail` too.
 
 | Request | Status |
 |---|---|
@@ -847,7 +852,7 @@ The 415 and 406 cases are **content negotiation**. Spring picks an `HttpMessageC
 
 #### JSON with Jackson
 
-Records map to JSON field by field, in declaration order. `null` components are written as `null`. **Unknown properties** in a request are dropped silently: that is Jackson 3's default (with Jackson 2, Spring Boot switched the failure off for you). A **missing** field becomes `null` for an object type (`Integer birthYear`). For a primitive (`int totalCopies`) Jackson 3 **rejects** a missing or `null` value with a 400 (`FAIL_ON_NULL_FOR_PRIMITIVES` is on by default; Jackson 2 silently used `0`). The 400 body is Spring Boot's generic one and does not say which field was wrong; validation (§5.3) gives proper messages for required fields.
+Records map to JSON field by field, in declaration order. `null` components are written as `null`. **Unknown properties** in a request are dropped silently: that is Jackson 3's default (with Jackson 2, Spring Boot switched the failure off for you). A **missing** field becomes `null` for an object type (`Integer birthYear`). For a primitive (`int totalCopies`) Jackson 3 **rejects** a missing or `null` value with a 400 (`FAIL_ON_NULL_FOR_PRIMITIVES` is on by default; Jackson 2 silently used `0`). That 400 happens while the body is read, before validation, so its `ProblemDetail` only says `"Failed to read request"` and names no field; use `Integer` + `@NotNull` for a per-field message (§5.3).
 
 Spring Boot 4 uses **Jackson 3**, whose packages moved from `com.fasterxml.jackson` to `tools.jackson` (the annotations such as `@JsonProperty` stay in `com.fasterxml.jackson.annotation`). Spring Boot 3 used Jackson 2, so older examples import the old packages. Watch the imports: springdoc still brings Jackson 2 onto the classpath, so an IDE may offer `com.fasterxml.jackson.databind.ObjectMapper` (Jackson 2) where you want `tools.jackson.databind` (Jackson 3, the one Spring Boot configures).
 
@@ -891,7 +896,183 @@ springdoc is not managed by the Spring Boot BOM, so its version (`springdoc.vers
 
 ### 5.3 Validation & errors
 
-_Written in Phase 06._
+**What it is.** This section has two halves:
+- **Bean Validation** rejects bad input before it reaches a service.
+- **One `@RestControllerAdvice`** turns every exception into an RFC 9457 `ProblemDetail`.
+
+Where the code is:
+- [`common/`](../spring-app/src/main/java/dev/playground/library/common/): the exceptions, `GlobalExceptionHandler` and `validation/PastOrPresentYear`.
+- `book/Isbn` and [`book/validation/`](../spring-app/src/main/java/dev/playground/library/book/validation/).
+- The constraints on the request records.
+
+Requests: [`http/06-validation.http`](../spring-app/http/06-validation.http).
+
+**Why it matters.** Clients get one error format for everything, with every broken field listed at once. Services throw domain exceptions and never deal with HTTP.
+
+#### Bean Validation — `IsbnValidatorTest`, `PastOrPresentYearTest`
+
+*Jakarta Validation* is the specification: the annotations and the `jakarta.validation` API. *Hibernate Validator* is its implementation. It comes from the same project as Hibernate ORM but has nothing to do with databases. `spring-boot-starter-validation` brings both. The constraints sit on the record components:
+
+```java
+public record CreateBookRequest(
+        @NotBlank @ValidIsbn String isbn,
+        @NotBlank @Size(max = 300) String title,
+        @PastOrPresentYear Integer publishedYear,
+        @PositiveOrZero int totalCopies,
+        Set<Long> authorIds) {}
+```
+
+| Constraint | Rejects |
+|---|---|
+| `@NotNull` | `null` |
+| `@NotEmpty` | `null`, `""`, an empty collection |
+| `@NotBlank` | `null`, `""`, `"  "` (strings only) |
+| `@Size(min, max)` | a string, collection or array of the wrong length |
+| `@Min` / `@Max`, `@Positive`, `@PositiveOrZero` | numbers out of range (the bounds are compile-time constants) |
+| `@Past`, `@Future`, `@PastOrPresent` | dates and times (`LocalDate`, `Instant`…), not a plain `Integer` year |
+| `@Email`, `@Pattern(regexp)` | strings that do not match |
+
+Every constraint except the "not null / empty / blank" family **accepts `null`**, so constraints compose. `@PastOrPresentYear Integer publishedYear` means "optional, but sensible if present". Add `@NotNull` to make it required.
+
+Annotations alone do nothing. Validation runs only when something triggers it:
+- `@Valid` on a controller parameter;
+- `@Validated` on a Spring bean or a `@ConfigurationProperties` class;
+- a direct call to `Validator.validate(object)`, which is what `IsbnValidatorTest` does, with no Spring at all.
+
+#### Custom constraints
+
+A constraint is an annotation plus a `ConstraintValidator`. The annotation must declare `message`, `groups` and `payload` (the spec says so).
+
+```java
+@Constraint(validatedBy = IsbnValidator.class)
+@Target({FIELD, PARAMETER, RECORD_COMPONENT, TYPE_USE})
+@Retention(RUNTIME)
+public @interface ValidIsbn {
+    String message() default "must be a valid ISBN-10 or ISBN-13";
+    Class<?>[] groups() default {};
+    Class<? extends Payload>[] payload() default {};
+}
+
+public class IsbnValidator implements ConstraintValidator<ValidIsbn, String> {
+    public boolean isValid(String value, ConstraintValidatorContext context) {
+        return value == null || value.isBlank() || Isbn.isValid(value);   // leave null/blank to @NotBlank
+    }
+}
+```
+
+The checksum logic lives in `book/Isbn`, not in the validator, because `BookMapper` also uses it: every ISBN is stored as 13 digits (`Isbn.toIsbn13`). That is how `0-441-01359-7` and `9780441013593` are recognised as the same book by the duplicate check (a `409`).
+
+`@PastOrPresentYear` exists because `@Max` needs a constant, and "no later than this year" changes every January. With a `java.time.Year` field the standard `@PastOrPresent` would do; the domain model uses a plain `Integer`, which maps straight to an `int` column. When Spring creates a validator, it can have beans injected (a `Clock`, a repository).
+
+#### `@Valid`, `@Validated` and method validation
+
+| You write | What happens | Failure |
+|---|---|---|
+| `@Valid @RequestBody CreateBookRequest request` | Spring MVC validates the body before calling the method | `MethodArgumentNotValidException` → 400 |
+| `@PathVariable @Positive Long id` (a constraint directly on a parameter) | Spring MVC's **built-in method validation** (Spring 6.1+) | `HandlerMethodValidationException` → 400 |
+| `@Valid` on a field, record component or type argument (`@Valid AddressRequest address`, `List<@Valid Item> items`) | Validation cascades into the nested object; without `@Valid` its constraints are ignored (`CascadingValidationTest`) | reported with the outer object (`address.city`, `items[0].name`) |
+| `@Validated` on a `@ConfigurationProperties` class | Validated once, at startup. Boot validates every nested object it binds, `@Valid` or not; `@Valid` on `loans` also covers the case where no `library.loans.*` key is set | the application does not start (`LibraryPropertiesTest.invalidSettingsStopTheStartup`) |
+| `@Validated` on a `@Service` class + constraints on method parameters | A proxy validates every call | `ConstraintViolationException` (or `MethodValidationException` with `spring.validation.method.adapt-constraint-violations=true`); not handled here, so a 500 |
+
+`@Valid` is the Jakarta annotation ("validate this object"). `@Validated` is Spring's own: it switches on method validation for a bean and accepts **validation groups** (`@Validated(OnCreate.class)`), which select a subset of the constraints. This project uses separate `Create…`/`Update…` records instead of groups, which is simpler to read.
+
+**The gotcha.** Once a controller method has a constraint directly on a parameter (the `@Positive` id), method validation takes over. The `@Valid` body is then validated as part of that step, so a bad body on `PUT /api/books/{id}` raises `HandlerMethodValidationException`, **not** `MethodArgumentNotValidException`. `GlobalExceptionHandler` handles both into the same `errors` shape (`AuthorControllerTest.updateWithAnInvalidBodyReportsTheFieldErrors`). Older code does this with `@Validated` on the controller class and handles `ConstraintViolationException`; without a handler for it, that code answers 500.
+
+#### Errors as `ProblemDetail` — `GlobalExceptionHandlerTest`
+
+RFC 9457 (which replaced RFC 7807) defines a JSON error format, served as `application/problem+json`:
+
+```json
+{
+  "title": "Bad Request",
+  "status": 400,
+  "detail": "Invalid request content.",
+  "instance": "/api/books",
+  "errors": {
+    "isbn": ["must be a valid ISBN-10 or ISBN-13"],
+    "title": ["must not be blank"],
+    "totalCopies": ["must be greater than or equal to 0"]
+  }
+}
+```
+
+| Member | Meaning |
+|---|---|
+| `type` | A URI naming the problem type. Its default, `about:blank`, means "just the status"; Spring leaves it out of the JSON, which the RFC allows |
+| `title` | Short summary of the type; Spring fills in the status reason phrase |
+| `status` | The HTTP status, repeated in the body |
+| `detail` | This occurrence, for a human |
+| `instance` | The request path, filled in by Spring MVC |
+| anything else | Extension members: here `errors`, set with `problem.setProperty("errors", map)` |
+
+`ProblemDetail` is Spring's class for that body. `GlobalExceptionHandler` is a `@RestControllerAdvice`: its `@ExceptionHandler` methods apply to every controller.
+
+```java
+@RestControllerAdvice
+public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
+
+    @ExceptionHandler(NotFoundException.class)
+    public ProblemDetail handleNotFound(NotFoundException ex) {
+        return ProblemDetail.forStatusAndDetail(HttpStatus.NOT_FOUND, ex.getMessage());
+    }
+
+    @ExceptionHandler(Exception.class)                       // everything else is a bug
+    public ProblemDetail handleUnexpected(Exception ex, HttpServletRequest request) {
+        log.error("Unexpected error on {} {}", request.getMethod(), request.getRequestURI(), ex);
+        return ProblemDetail.forStatusAndDetail(HttpStatus.INTERNAL_SERVER_ERROR, "An unexpected error occurred.");
+    }
+    // + overrides of handleMethodArgumentNotValid / handleHandlerMethodValidationException that add "errors"
+}
+```
+
+| Exception | Status | Where it comes from |
+|---|---|---|
+| `NotFoundException("Book", 7)` | 404, `"Book 7 not found"` | services |
+| `ConflictException(message)` | 409 | services (duplicate ISBN; more rules in §5.5) |
+| `ExternalServiceException(service, cause)` | 502, cause only in the log | the Open Library client (§5.9) |
+| `MethodArgumentNotValidException`, `HandlerMethodValidationException` | 400 + `errors` | `@Valid`, parameter constraints |
+| Spring MVC's own: unreadable JSON, type mismatch, unknown path, 405, 406, 415 | as before (§5.2), now as ProblemDetails | handled by the base class `ResponseEntityExceptionHandler` |
+| any other `Exception` | 500, generic `detail`, stack trace logged at ERROR | bugs |
+
+- **The services know nothing about HTTP.** They throw plain unchecked exceptions from `common/`; the handler decides the status. §5.2's `ResponseStatusException` worked, but it tied the service to Spring MVC.
+- **The closest exception type wins.** When several handlers match, Spring picks the one declared for the nearest superclass. The catch-all `Exception` handler therefore never hides the more specific ones, including the base class's. An `@ExceptionHandler` method inside a controller wins over the advice, for that controller only.
+- **`spring.mvc.problemdetails.enabled: true`** registers Spring Boot's own `ResponseEntityExceptionHandler`, which makes Spring MVC's exceptions ProblemDetails. It backs off as soon as the application defines its own handler (`@ConditionalOnMissingBean`), so this project does not set it.
+- **Unhandled errors** (none should be left) and errors raised outside Spring MVC, such as in a servlet filter, go to Spring Boot's `/error` endpoint. That endpoint writes the older `timestamp`/`status`/`error`/`path` JSON.
+
+#### Messages and locale
+
+Hibernate Validator ships its built-in messages in many languages. On its own it picks the JVM's locale. Inside a request, Spring passes it the request's locale instead: the `LocaleResolver` reads `Accept-Language`, and when the header is missing it uses the JVM's locale. The first run on a Spanish Windows machine returned `"no debe estar vacío"` next to our English-only custom messages. `application.yml` pins the API to English:
+
+```yaml
+spring:
+  web:
+    locale: en
+    locale-resolver: fixed
+```
+
+Validation that runs **outside a request** still uses the JVM locale; `@ConfigurationProperties` validation at startup is an example. That is why `LibraryPropertiesTest` checks the key and the constraint name, not the message text. MockMvc requests default to English, so the tests alone did not catch any of this.
+
+#### Three ways to test it
+
+| Test | Setup | Use it for |
+|---|---|---|
+| `IsbnValidatorTest`, `PastOrPresentYearTest`, `CascadingValidationTest` | `Validation.buildDefaultValidatorFactory().getValidator()`, no Spring | A constraint's rules and Bean Validation itself, fast |
+| `GlobalExceptionHandlerTest` | `MockMvcBuilders.standaloneSetup(controller).setControllerAdvice(handler)`: MVC without a Spring context | The handler, driven by a test-only controller that throws each exception |
+| `AuthorControllerTest`, `BookControllerTest` | `@WebMvcTest`: it picks up every `@ControllerAdvice` automatically | The real JSON a client gets for each endpoint |
+
+The test-only controller in `GlobalExceptionHandlerTest` needs `@RestController`: since Spring 6, even standalone MockMvc maps only `@Controller` classes. It is a **non-static** inner class so that component scanning skips it; scanning only picks up top-level and static nested classes. Otherwise it would show up in every test that boots the whole application.
+
+#### OpenAPI
+
+springdoc reads the constraints into the schema. `@NotBlank` fields are listed under `required`, `@Size(max = 300)` becomes `maxLength`, and `@Positive` on the id becomes `exclusiveMinimum: 0`. Error responses are not documented automatically: the handlers have no `@ResponseStatus`. Add `@ApiResponse` on the operations when a client needs them listed.
+
+**Gotchas**
+- **Forgetting `@Valid` silently skips validation.** The constraints on the record are still there; nothing checks them.
+- **Cascading needs `@Valid`.** In a request body, a nested object's constraints (or a list element's) are ignored unless the field or type argument that holds it has `@Valid` (`CascadingValidationTest`). `@ConfigurationProperties` binding is the exception: Boot validates nested objects anyway.
+- **A missing primitive fails before validation.** Jackson rejects a missing `int totalCopies` while reading the body. The 400 then says only `"Failed to read request"`, with no `errors` map. For a per-field message, use `Integer` with `@NotNull`.
+- **Two exceptions for one kind of mistake.** A bad body arrives as `MethodArgumentNotValidException` or as `HandlerMethodValidationException`, depending on whether any parameter of that method has a constraint. Handle both.
+- **The catch-all handler catches too much.** From §5.7, Spring Security's `AccessDeniedException` must reach the security filters to become a 403. A generic `@ExceptionHandler(Exception.class)` would turn it into a 500 unless it is handled or rethrown first. The same happens to an exception class annotated with `@ResponseStatus`: that annotation is read by a resolver that runs after the advice, so the catch-all gets there first.
+- **Never echo an unexpected exception's message.** It can contain SQL, file paths or data. The 500 body is generic on purpose; the log has the rest.
 
 ### 5.4 Persistence with JPA
 
@@ -1012,6 +1193,14 @@ A map for orientation, not a claim that the pieces are identical. It grows with 
 | Swashbuckle / `Microsoft.AspNetCore.OpenApi` | springdoc-openapi | `/v3/api-docs` + `/swagger-ui.html` |
 | Moq `Setup(...).Returns(...)` / `Verify(...)` | Mockito `given(...).willReturn(...)` / `verify(...)` | `@MockitoBean` puts the mock in the Spring context |
 | `.http` files in Visual Studio / Rider | `.http` files with VS Code REST Client or IntelliJ | Nearly the same syntax |
+| DataAnnotations: `[Required]`, `[StringLength]`, `[Range]`, `[RegularExpression]` | Bean Validation: `@NotBlank`/`@NotNull`, `@Size`, `@Min`/`@Max`, `@Pattern` | Same idea: attributes on the model, checked by a framework |
+| A custom `ValidationAttribute` / `IValidatableObject` | A custom constraint + `ConstraintValidator` / a class-level constraint | |
+| FluentValidation | No standard equivalent | Custom constraints, or a validator you call from the service |
+| `[ApiController]`'s automatic 400 on an invalid `ModelState` | `@Valid` on each parameter | Spring validates only where you ask |
+| `ValidationProblemDetails` (`errors` dictionary) | `ProblemDetail` + an `errors` property you add | Spring's default validation ProblemDetail has no per-field map |
+| `ProblemDetails`, `Results.Problem(...)` | `ProblemDetail.forStatusAndDetail(...)` | RFC 9457 in both |
+| `UseExceptionHandler` / `IExceptionHandler` / exception filters | `@RestControllerAdvice` + `@ExceptionHandler` | |
+| `services.AddOptions<T>().ValidateDataAnnotations().ValidateOnStart()` | `@Validated` on a `@ConfigurationProperties` class | The bean is validated when it is created, which is at startup; there is no separate `ValidateOnStart` step |
 
 **LINQ ↔ Streams**
 
@@ -1049,5 +1238,7 @@ A map for orientation, not a claim that the pieces are identical. It grows with 
 - **Two beans of one type fail the startup.** .NET quietly injects the last registration. Spring stops with `NoUniqueBeanDefinitionException` until you add `@Primary` or `@Qualifier`.
 - **Unknown configuration keys are silently ignored.** A typo in `application.yml` does not fail anything; the default applies.
 - **`@RequestBody` is not inferred.** `[ApiController]` binds a complex parameter from the body by itself. In Spring, leave out `@RequestBody` and the JSON is silently ignored.
-- **An unhandled exception is a 500 with a generic body.** There is no developer exception page. Map your exceptions to statuses yourself (§5.3).
+- **An unhandled exception is a 500 with a generic body.** There is no developer exception page. Map your exceptions to statuses yourself; this project does it in `GlobalExceptionHandler` (§5.3).
+- **Validation is opt-in per parameter.** `[ApiController]` validates every bound model and answers 400 by itself. In Spring, a `@RequestBody` without `@Valid` is never validated, whatever constraints its record carries.
+- **Validation messages follow the locale.** Spring hands Hibernate Validator the request's `Accept-Language`, or else the machine's locale, and the built-in messages are translated to it. On a Spanish Windows machine you get `"no debe estar vacío"` unless the locale is pinned (§5.3).
 - **A missing `int` in the JSON is a 400.** System.Text.Json leaves a missing value-type property at its default (`0`). Jackson 3 rejects a missing or `null` primitive. Use `Integer` for optional numbers.

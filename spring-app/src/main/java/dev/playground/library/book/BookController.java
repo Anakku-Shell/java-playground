@@ -3,6 +3,8 @@ package dev.playground.library.book;
 import dev.playground.library.book.dto.BookResponse;
 import dev.playground.library.book.dto.CreateBookRequest;
 import dev.playground.library.book.dto.UpdateBookRequest;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.Positive;
 import java.net.URI;
 import java.util.List;
 import org.springframework.http.HttpStatus;
@@ -38,13 +40,13 @@ public class BookController {
     }
 
     @GetMapping("/{id}")
-    public BookResponse get(@PathVariable Long id) {
+    public BookResponse get(@PathVariable @Positive Long id) {
         return service.findById(id);
     }
 
     /** 201 Created with a Location header pointing at the new resource. */
     @PostMapping
-    public ResponseEntity<BookResponse> create(@RequestBody CreateBookRequest request) {
+    public ResponseEntity<BookResponse> create(@Valid @RequestBody CreateBookRequest request) {
         BookResponse created = service.create(request);
         URI location = ServletUriComponentsBuilder.fromCurrentRequest()
                 .path("/{id}")
@@ -54,13 +56,13 @@ public class BookController {
     }
 
     @PutMapping("/{id}")
-    public BookResponse update(@PathVariable Long id, @RequestBody UpdateBookRequest request) {
+    public BookResponse update(@PathVariable @Positive Long id, @Valid @RequestBody UpdateBookRequest request) {
         return service.update(id, request);
     }
 
     @DeleteMapping("/{id}")
     @ResponseStatus(HttpStatus.NO_CONTENT)
-    public void delete(@PathVariable Long id) {
+    public void delete(@PathVariable @Positive Long id) {
         service.delete(id);
     }
 }

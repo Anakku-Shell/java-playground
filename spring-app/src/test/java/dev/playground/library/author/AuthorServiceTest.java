@@ -6,9 +6,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import dev.playground.library.author.dto.AuthorResponse;
 import dev.playground.library.author.dto.CreateAuthorRequest;
 import dev.playground.library.author.dto.UpdateAuthorRequest;
+import dev.playground.library.common.NotFoundException;
 import org.junit.jupiter.api.Test;
-import org.springframework.http.HttpStatus;
-import org.springframework.web.server.ResponseStatusException;
 
 /**
  * A plain unit test: no Spring context at all. Constructor injection is what makes this possible:
@@ -55,16 +54,14 @@ class AuthorServiceTest {
     }
 
     @Test
-    void missingIdIs404() {
-        // For now the service throws Spring's ResponseStatusException; §5.3 replaces it with a
-        // domain NotFoundException mapped to a ProblemDetail in one place.
+    void missingIdIsNotFound() {
+        // The service throws a domain exception with no HTTP in it; GlobalExceptionHandler (§5.3)
+        // decides that it means 404.
         assertThatThrownBy(() -> service.findById(99L))
-                .isInstanceOfSatisfying(
-                        ResponseStatusException.class,
-                        e -> assertThat(e.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND))
-                .hasMessageContaining("Author 99 not found");
+                .isInstanceOf(NotFoundException.class)
+                .hasMessage("Author 99 not found");
         assertThatThrownBy(() -> service.update(99L, new UpdateAuthorRequest("x", null)))
-                .isInstanceOf(ResponseStatusException.class);
-        assertThatThrownBy(() -> service.delete(99L)).isInstanceOf(ResponseStatusException.class);
+                .isInstanceOf(NotFoundException.class);
+        assertThatThrownBy(() -> service.delete(99L)).isInstanceOf(NotFoundException.class);
     }
 }

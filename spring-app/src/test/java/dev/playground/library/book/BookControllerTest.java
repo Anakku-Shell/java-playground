@@ -9,7 +9,10 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import dev.playground.library.book.dto.BookResponse;
 import dev.playground.library.book.dto.CreateBookRequest;
 import dev.playground.library.book.dto.UpdateBookRequest;
+import dev.playground.library.common.ConflictException;
+import dev.playground.library.common.NotFoundException;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -18,7 +21,6 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.assertj.MockMvcTester;
-import org.springframework.web.server.ResponseStatusException;
 
 /** The HTTP contract of {@link BookController}, with the service mocked. Guide: §5.2 REST API. */
 @WebMvcTest(BookController.class)
@@ -67,9 +69,20 @@ class BookControllerTest {
 
     @Test
     void getMissingIs404() {
-        given(service.findById(42L)).willThrow(new ResponseStatusException(HttpStatus.NOT_FOUND));
+        given(service.findById(42L)).willThrow(new NotFoundException("Book", 42L));
 
-        assertThat(mvc.get().uri("/api/books/42")).hasStatus(HttpStatus.NOT_FOUND);
+        assertThat(mvc.get().uri("/api/books/42"))
+                .hasStatus(HttpStatus.NOT_FOUND)
+                .hasContentType(MediaType.APPLICATION_PROBLEM_JSON)
+                .bodyJson()
+                .isStrictlyEqualTo("""
+                        {
+                          "title": "Not Found",
+                          "status": 404,
+                          "detail": "Book 42 not found",
+                          "instance": "/api/books/42"
+                        }
+                        """);
     }
 
     @Test
@@ -118,9 +131,7 @@ class BookControllerTest {
 
     @Test
     void deleteMissingIs404() {
-        willThrow(new ResponseStatusException(HttpStatus.NOT_FOUND))
-                .given(service)
-                .delete(42L);
+        willThrow(new NotFoundException("Book", 42L)).given(service).delete(42L);
 
         assertThat(mvc.delete().uri("/api/books/42")).hasStatus(HttpStatus.NOT_FOUND);
     }
@@ -128,11 +139,16 @@ class BookControllerTest {
     @Test
     void malformedJsonIs400() {
         // Jackson cannot read the body, so Spring answers 400 before the controller method runs.
+        // ResponseEntityExceptionHandler (GlobalExceptionHandler's base class) makes it a ProblemDetail.
         assertThat(mvc.post()
                         .uri("/api/books")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"title\": \"Dune\","))
-                .hasStatus(HttpStatus.BAD_REQUEST);
+                .hasStatus(HttpStatus.BAD_REQUEST)
+                .hasContentType(MediaType.APPLICATION_PROBLEM_JSON)
+                .bodyJson()
+                .extractingPath("$.detail")
+                .isEqualTo("Failed to read request");
         verifyNoInteractions(service);
     }
 
@@ -140,6 +156,8 @@ class BookControllerTest {
     void missingPrimitiveIs400() {
         // totalCopies is an int. Jackson 3 enables FAIL_ON_NULL_FOR_PRIMITIVES by default, so a
         // missing (or null) value is rejected instead of silently becoming 0 as in Jackson 2.
+        // This happens while reading the body, before @Valid can run, so there is no "errors" map:
+        // the ProblemDetail only says "Failed to read request".
         assertThat(mvc.post()
                         .uri("/api/books")
                         .contentType(MediaType.APPLICATION_JSON)
@@ -147,6 +165,86 @@ class BookControllerTest {
                                 {"isbn": "9780441013593", "title": "Dune"}
                                 """))
                 .hasStatus(HttpStatus.BAD_REQUEST);
+        verifyNoInteractions(service);
+    }
+
+    @Test
+    void invalidIsbnIs400WithAFieldError() {
+        assertThat(mvc.post()
+                        .uri("/api/books")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"isbn": "9780441013594", "title": "Dune", "totalCopies": 3}
+                                """))
+                .hasStatus(HttpStatus.BAD_REQUEST)
+                .hasContentType(MediaType.APPLICATION_PROBLEM_JSON)
+                .bodyJson()
+                .extractingPath("$.errors")
+                .isEqualTo(Map.of("isbn", List.of("must be a valid ISBN-10 or ISBN-13")));
+        verifyNoInteractions(service);
+    }
+
+    @Test
+    void blankTitleIs400() {
+        assertThat(mvc.post()
+                        .uri("/api/books")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"isbn": "9780441013593", "title": "", "totalCopies": 3}
+                                """))
+                .hasStatus(HttpStatus.BAD_REQUEST)
+                .bodyJson()
+                .extractingPath("$.errors")
+                .isEqualTo(Map.of("title", List.of("must not be blank")));
+        verifyNoInteractions(service);
+    }
+
+    @Test
+    void everyInvalidFieldIsReportedAtOnce() {
+        // Validation does not stop at the first failure: the client can fix everything in one go.
+        assertThat(mvc.post()
+                        .uri("/api/books")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"isbn": "", "title": "Dune", "publishedYear": 3000, "totalCopies": -1}
+                                """))
+                .hasStatus(HttpStatus.BAD_REQUEST)
+                .bodyJson()
+                .extractingPath("$.errors")
+                .isEqualTo(Map.of(
+                        "isbn", List.of("must not be blank"),
+                        "publishedYear", List.of("must be a year between 0 and the current year"),
+                        "totalCopies", List.of("must be greater than or equal to 0")));
+        verifyNoInteractions(service);
+    }
+
+    @Test
+    void duplicateIsbnIs409() {
+        var request = new CreateBookRequest("9780441013593", "Dune", 1965, 3, Set.of());
+        given(service.create(request))
+                .willThrow(new ConflictException("A book with ISBN 9780441013593 already exists"));
+
+        assertThat(mvc.post()
+                        .uri("/api/books")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"isbn": "9780441013593", "title": "Dune", "publishedYear": 1965,
+                                 "totalCopies": 3, "authorIds": []}
+                                """))
+                .hasStatus(HttpStatus.CONFLICT)
+                .hasContentType(MediaType.APPLICATION_PROBLEM_JSON)
+                .bodyJson()
+                .extractingPath("$.detail")
+                .isEqualTo("A book with ISBN 9780441013593 already exists");
+    }
+
+    @Test
+    void nonPositiveIdIs400() {
+        assertThat(mvc.delete().uri("/api/books/-1"))
+                .hasStatus(HttpStatus.BAD_REQUEST)
+                .bodyJson()
+                .extractingPath("$.errors")
+                .isEqualTo(Map.of("id", List.of("must be greater than 0")));
         verifyNoInteractions(service);
     }
 

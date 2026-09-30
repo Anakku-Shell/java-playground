@@ -1,0 +1,56 @@
+### Guide §5.3 Validation & errors. VS Code REST Client syntax: click "Send Request" above each request.
+### The app must be running on :8080, freshly started (storage is in memory; the ids assume that).
+### Every error response is a ProblemDetail: Content-Type application/problem+json.
+
+@host = http://localhost:8080
+
+### Create a book with a hyphenated ISBN-10 (201). The response shows it stored as ISBN-13: 9780441013593.
+POST {{host}}/api/books
+Content-Type: application/json
+
+{"isbn": "0-441-01359-7", "title": "Dune", "publishedYear": 1965, "totalCopies": 3}
+
+### The same book as ISBN-13 (409, detail "A book with ISBN 9780441013593 already exists")
+POST {{host}}/api/books
+Content-Type: application/json
+
+{"isbn": "9780441013593", "title": "Dune (again)", "publishedYear": 1965, "totalCopies": 1}
+
+### Several invalid fields at once (400, errors: isbn, title, totalCopies)
+POST {{host}}/api/books
+Content-Type: application/json
+
+{"isbn": "9780441013594", "title": "", "totalCopies": -1}
+
+### totalCopies missing (400, detail "Failed to read request", no errors map: Jackson fails before validation)
+POST {{host}}/api/books
+Content-Type: application/json
+
+{"isbn": "9780141439518", "title": "Emma"}
+
+### Invalid body on PUT (400, errors.title). Method validation path, same shape.
+PUT {{host}}/api/books/1
+Content-Type: application/json
+
+{"isbn": "9780441013593", "title": " ", "totalCopies": 3}
+
+### Author with a blank name and a future birth year (400, errors: birthYear, name)
+POST {{host}}/api/authors
+Content-Type: application/json
+
+{"name": "", "birthYear": 3000}
+
+### A non-positive id (400, errors.id)
+GET {{host}}/api/authors/0
+
+### An id that does not exist (404, detail "Book 999 not found")
+GET {{host}}/api/books/999
+
+### Malformed JSON (400, detail "Failed to read request")
+POST {{host}}/api/books
+Content-Type: application/json
+
+{"isbn": "9780441013593",
+
+### A path with no endpoint (404, detail "No static resource api/nothing-here.")
+GET {{host}}/api/nothing-here

@@ -5,7 +5,10 @@ import dev.playground.library.book.dto.CreateBookRequest;
 import dev.playground.library.book.dto.UpdateBookRequest;
 import java.util.List;
 
-/** Manual mapping between {@link Book} and its DTOs. Guide: §5.2 REST API. */
+/**
+ * Manual mapping between {@link Book} and its DTOs. ISBNs are stored as 13 digits whatever form the
+ * request used (§5.3). Guide: §5.2 REST API.
+ */
 public final class BookMapper {
 
     private BookMapper() {}
@@ -23,11 +26,11 @@ public final class BookMapper {
     }
 
     public static Book toNewBook(CreateBookRequest request) {
-        return new Book(request.isbn(), request.title(), request.publishedYear(), request.totalCopies());
+        return new Book(Isbn.toIsbn13(request.isbn()), request.title(), request.publishedYear(), request.totalCopies());
     }
 
     public static void apply(UpdateBookRequest request, Book book) {
-        book.setIsbn(request.isbn());
+        book.setIsbn(Isbn.toIsbn13(request.isbn()));
         book.setTitle(request.title());
         book.setPublishedYear(request.publishedYear());
         book.setTotalCopies(request.totalCopies());

@@ -73,4 +73,21 @@ class LibraryPropertiesTest {
                                 context.getBean(LibraryProperties.class).loans())
                         .isEqualTo(new LibraryProperties.Loans(3, 14)));
     }
+
+    @Test
+    void invalidSettingsStopTheStartup() {
+        // @Validated on the properties class: a bad value fails the context at startup, with a
+        // message naming the key, instead of surfacing later as odd behaviour (a zero loan limit).
+        new ApplicationContextRunner()
+                .withUserConfiguration(Config.class)
+                .withPropertyValues("library.name=Bare", "library.loans.max-active=0")
+                .run(context -> assertThat(context)
+                        .hasFailed()
+                        .getFailure()
+                        .rootCause()
+                        // The key and the constraint, not the message text: outside a request the
+                        // message uses the JVM locale ("debe ser mayor que 0" on a Spanish machine).
+                        .hasMessageContaining("loans.maxActive")
+                        .hasMessageContaining("Positive"));
+    }
 }

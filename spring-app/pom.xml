@@ -37,10 +37,23 @@
             <version>${springdoc.version}</version>
         </dependency>
 
+        <!-- Bean Validation (Jakarta Validation API + Hibernate Validator): @Valid, @NotBlank... Guide: §5.3. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-validation</artifactId>
+        </dependency>
+
         <!-- JUnit, AssertJ, Mockito, Spring Test and the MVC test slice. -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-webmvc-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- Boot 4 test starter paired with the validation starter (start.spring.io adds it). -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-validation-test</artifactId>
             <scope>test</scope>
         </dependency>
     </dependencies>

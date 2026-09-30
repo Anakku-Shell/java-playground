@@ -6,11 +6,11 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import dev.playground.library.book.dto.BookResponse;
 import dev.playground.library.book.dto.CreateBookRequest;
 import dev.playground.library.book.dto.UpdateBookRequest;
+import dev.playground.library.common.ConflictException;
+import dev.playground.library.common.NotFoundException;
 import java.util.List;
 import java.util.Set;
 import org.junit.jupiter.api.Test;
-import org.springframework.http.HttpStatus;
-import org.springframework.web.server.ResponseStatusException;
 
 /** Book use cases on the real in-memory repository, without Spring. Guide: §5.2 REST API. */
 class BookServiceTest {
@@ -46,15 +46,48 @@ class BookServiceTest {
     }
 
     @Test
-    void missingIdIs404() {
+    void missingIdIsNotFound() {
         assertThatThrownBy(() -> service.findById(42L))
-                .isInstanceOfSatisfying(
-                        ResponseStatusException.class,
-                        e -> assertThat(e.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND))
-                .hasMessageContaining("Book 42 not found");
-        assertThatThrownBy(() -> service.update(42L, new UpdateBookRequest("1", "x", null, 1, Set.of())))
-                .isInstanceOf(ResponseStatusException.class);
-        assertThatThrownBy(() -> service.delete(42L)).isInstanceOf(ResponseStatusException.class);
+                .isInstanceOf(NotFoundException.class)
+                .hasMessage("Book 42 not found");
+        assertThatThrownBy(() -> service.update(42L, new UpdateBookRequest("9780441013593", "x", null, 1, Set.of())))
+                .isInstanceOf(NotFoundException.class);
+        assertThatThrownBy(() -> service.delete(42L)).isInstanceOf(NotFoundException.class);
+    }
+
+    @Test
+    void isbn10IsStoredAsIsbn13() {
+        // The same book can be written as ISBN-10 or ISBN-13, with or without hyphens. Storing one
+        // canonical form makes the duplicate check (and a later database unique constraint) work.
+        BookResponse created = service.create(new CreateBookRequest("0-441-01359-7", "Dune", 1965, 3, Set.of()));
+
+        assertThat(created.isbn()).isEqualTo("9780441013593");
+    }
+
+    @Test
+    void duplicateIsbnIsAConflict() {
+        service.create(dune());
+
+        // The ISBN-10 of an existing ISBN-13 is the same book.
+        assertThatThrownBy(() -> service.create(new CreateBookRequest("0441013597", "Dune again", 1965, 1, Set.of())))
+                .isInstanceOf(ConflictException.class)
+                .hasMessage("A book with ISBN 9780441013593 already exists");
+    }
+
+    @Test
+    void updateCannotTakeAnotherBooksIsbnButMayKeepItsOwn() {
+        BookResponse dune = service.create(dune());
+        BookResponse emma = service.create(new CreateBookRequest("9780141439518", "Emma", 1815, 2, Set.of()));
+
+        assertThatThrownBy(
+                        () -> service.update(emma.id(), new UpdateBookRequest(dune.isbn(), "Emma", 1815, 2, Set.of())))
+                .isInstanceOf(ConflictException.class);
+        // The rejected update left Emma untouched: the check runs before apply() changes the stored
+        // object in place.
+        assertThat(service.findById(emma.id()).isbn()).isEqualTo("9780141439518");
+        assertThat(service.update(dune.id(), new UpdateBookRequest(dune.isbn(), "Dune", 1965, 5, Set.of()))
+                        .totalCopies())
+                .isEqualTo(5);
     }
 
     @Test

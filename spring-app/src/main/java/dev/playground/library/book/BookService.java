@@ -3,12 +3,16 @@ package dev.playground.library.book;
 import dev.playground.library.book.dto.BookResponse;
 import dev.playground.library.book.dto.CreateBookRequest;
 import dev.playground.library.book.dto.UpdateBookRequest;
+import dev.playground.library.common.ConflictException;
+import dev.playground.library.common.NotFoundException;
 import java.util.List;
-import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
-import org.springframework.web.server.ResponseStatusException;
 
-/** Book use cases; takes and returns DTOs. Guide: §5.2 REST API. */
+/**
+ * Book use cases; takes and returns DTOs. Missing ids and duplicate ISBNs are domain exceptions
+ * ({@code NotFoundException}, {@code ConflictException}), mapped to HTTP in one place (§5.3).
+ * Guide: §5.2 REST API.
+ */
 @Service
 public class BookService {
 
@@ -27,28 +31,38 @@ public class BookService {
     }
 
     public BookResponse create(CreateBookRequest request) {
-        return BookMapper.toResponse(repository.save(BookMapper.toNewBook(request)));
+        Book book = BookMapper.toNewBook(request);
+        requireUniqueIsbn(book.getIsbn(), null);
+        return BookMapper.toResponse(repository.save(book));
     }
 
     public BookResponse update(Long id, UpdateBookRequest request) {
         Book book = getOrThrow(id);
+        // Check before apply(): the stored Book is changed in place, so a rejected update must not
+        // have touched it yet.
+        requireUniqueIsbn(Isbn.toIsbn13(request.isbn()), id);
         BookMapper.apply(request, book);
         return BookMapper.toResponse(repository.save(book));
     }
 
     public void delete(Long id) {
         if (!repository.existsById(id)) {
-            throw notFound(id);
+            throw new NotFoundException("Book", id);
         }
         repository.deleteById(id);
     }
 
-    private Book getOrThrow(Long id) {
-        return repository.findById(id).orElseThrow(() -> notFound(id));
+    /** A business rule, so it lives in the service: another book (not this one) already has the ISBN. */
+    private void requireUniqueIsbn(String isbn13, Long ownId) {
+        repository
+                .findByIsbn(isbn13)
+                .filter(existing -> !existing.getId().equals(ownId))
+                .ifPresent(existing -> {
+                    throw new ConflictException("A book with ISBN " + isbn13 + " already exists");
+                });
     }
 
-    // Temporary until §5.3 (see AuthorService).
-    private static ResponseStatusException notFound(Long id) {
-        return new ResponseStatusException(HttpStatus.NOT_FOUND, "Book " + id + " not found");
+    private Book getOrThrow(Long id) {
+        return repository.findById(id).orElseThrow(() -> new NotFoundException("Book", id));
     }
 }
