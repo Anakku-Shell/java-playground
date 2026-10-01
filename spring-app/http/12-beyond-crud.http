@@ -1,0 +1,70 @@
+### Guide §5.9 Beyond CRUD. VS Code REST Client syntax: click "Send Request" above each request.
+### Start the app with the dev profile (demo users, all with the password "demo-password"):
+###   ./mvnw -pl spring-app spring-boot:run -Dspring-boot.run.profiles=dev
+### The import requests call openlibrary.org: they need internet. Ids assume the demo data on an
+### empty database (docker compose -f spring-app/compose.yaml down -v).
+
+@host = http://localhost:8080
+
+# @name librarian
+POST {{host}}/api/auth/login
+Content-Type: application/json
+
+{"email": "librarian@library.test", "password": "demo-password"}
+
+### Preview an import (200): what Open Library knows, nothing saved. Run it twice: the second answer
+### comes from the cache, in a few milliseconds
+GET {{host}}/api/books/import/978-0-547-92822-7
+Authorization: Bearer {{librarian.response.body.accessToken}}
+
+### Import it (201, one copy, Location: /api/books/{id}). Its authors are reused by name or created
+POST {{host}}/api/books/import/978-0-547-92822-7
+Authorization: Bearer {{librarian.response.body.accessToken}}
+
+### The same ISBN again (409), answered before any call to Open Library
+POST {{host}}/api/books/import/9780547928227
+Authorization: Bearer {{librarian.response.body.accessToken}}
+
+### An invalid ISBN (400: the check digit is wrong)
+POST {{host}}/api/books/import/9780547928228
+Authorization: Bearer {{librarian.response.body.accessToken}}
+
+### Overdue loans (200: the demo data has one, Grace's copy of Pale Blue Dot). OverdueLoanJob logs
+### the same list every day at 08:00 (library.jobs.overdue-cron)
+GET {{host}}/api/loans/overdue
+Authorization: Bearer {{librarian.response.body.accessToken}}
+
+### Borrow Cosmos for Alan (201). Then look at the application log: a moment later, on a thread
+### named async-N, "Notify member 2: 'Cosmos' is due on ...", written after the commit
+POST {{host}}/api/loans
+Authorization: Bearer {{librarian.response.body.accessToken}}
+Content-Type: application/json
+
+{"bookId": 8, "memberId": 2}
+
+### Actuator: health is public and says only UP or DOWN (and the probe groups)
+GET {{host}}/actuator/health
+
+### ...a librarian also sees each check: db, diskSpace, ping...
+GET {{host}}/actuator/health
+Authorization: Bearer {{librarian.response.body.accessToken}}
+
+### The build (artifact, version, time) and the Java version: public
+GET {{host}}/actuator/info
+
+### Metrics: librarians only (401 without a token). The list of names...
+GET {{host}}/actuator/metrics
+Authorization: Bearer {{librarian.response.body.accessToken}}
+
+### ...and one of them: the calls to Open Library. After the requests above, COUNT is 1: the second
+### preview and the import found the book in the cache
+GET {{host}}/actuator/metrics/http.client.requests
+Authorization: Bearer {{librarian.response.body.accessToken}}
+
+### Request timings for one endpoint, filtered by tag
+GET {{host}}/actuator/metrics/http.server.requests?tag=uri:/api/loans/overdue
+Authorization: Bearer {{librarian.response.body.accessToken}}
+
+### Not exposed over HTTP, even for a librarian (404): env would show the configuration
+GET {{host}}/actuator/env
+Authorization: Bearer {{librarian.response.body.accessToken}}

@@ -189,6 +189,12 @@ class LoanSecurityIT {
     }
 
     @Test
+    void overdueLoansAreForLibrarians() {
+        assertThat(get(ada, "/api/loans/overdue")).hasStatus(HttpStatus.FORBIDDEN);
+        assertThat(get(librarian, "/api/loans/overdue")).hasStatusOk();
+    }
+
+    @Test
     void theAuditTrailIsForLibrarians() {
         assertThat(get(ada, "/api/audit-events")).hasStatus(HttpStatus.FORBIDDEN);
         assertThat(get(librarian, "/api/audit-events")).hasStatusOk();

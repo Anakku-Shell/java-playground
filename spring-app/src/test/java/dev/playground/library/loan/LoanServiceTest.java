@@ -20,15 +20,18 @@ import dev.playground.library.loan.dto.LoanResponse;
 import dev.playground.library.member.Member;
 import dev.playground.library.member.MemberRepository;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneOffset;
+import java.util.List;
 import java.util.Optional;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.context.ApplicationEventPublisher;
 
 /**
  * The loan rules, with the repositories mocked and a fixed {@code Clock}: "now" is always
@@ -51,6 +54,9 @@ class LoanServiceTest {
     @Mock
     private AuditService audit;
 
+    @Mock
+    private ApplicationEventPublisher events;
+
     private LoanService service;
 
     private Book dune;
@@ -60,7 +66,7 @@ class LoanServiceTest {
     void setUp() {
         // Built by hand: @InjectMocks only injects mocks, and the clock and settings are real values.
         var properties = new LibraryProperties("Test library", new LibraryProperties.Loans(3, 14));
-        service = new LoanService(loans, books, members, properties, Clock.fixed(NOW, ZoneOffset.UTC), audit);
+        service = new LoanService(loans, books, members, properties, Clock.fixed(NOW, ZoneOffset.UTC), audit, events);
 
         dune = withId(dune(), 1L);
         dune.setTotalCopies(2);
@@ -83,16 +89,39 @@ class LoanServiceTest {
     }
 
     @Test
+    void borrowAnnouncesTheNewLoan() {
+        bookAndMemberExist();
+        given(loans.save(any(Loan.class))).willAnswer(invocation -> withId(invocation.getArgument(0), 5L));
+
+        service.borrow(1L, 7L);
+
+        // Published inside the transaction; the listener runs after the commit (LoanEventsIT).
+        then(events).should().publishEvent(new LoanCreatedEvent(5L, 1L, "Dune", 7L, LocalDate.of(2026, 10, 14)));
+    }
+
+    @Test
     void timestampsKeepOnlyWhatTheDatabaseStores() {
         // Java's clock can tick below a microsecond; timestamptz keeps microseconds. Without the
         // truncation, the POST response and a later GET would show two different loanedAt values.
         Instant precise = Instant.parse("2026-09-30T10:00:00.123456789Z");
         var properties = new LibraryProperties("Test library", new LibraryProperties.Loans(3, 14));
-        service = new LoanService(loans, books, members, properties, Clock.fixed(precise, ZoneOffset.UTC), audit);
+        service =
+                new LoanService(loans, books, members, properties, Clock.fixed(precise, ZoneOffset.UTC), audit, events);
         bookAndMemberExist();
         given(loans.save(any(Loan.class))).willAnswer(invocation -> withId(invocation.getArgument(0), 5L));
 
         assertThat(service.borrow(1L, 7L).loanedAt()).isEqualTo(Instant.parse("2026-09-30T10:00:00.123456Z"));
+    }
+
+    @Test
+    void overdueLoansAreTheActiveOnesDueBeforeToday() {
+        // "Today" comes from the fixed clock: 2026-09-30 in UTC.
+        Loan late = withId(new Loan(dune, ada, NOW.minus(Duration.ofDays(20)), LocalDate.of(2026, 9, 20)), 5L);
+        given(loans.findOverdue(LocalDate.of(2026, 9, 30))).willReturn(List.of(late));
+
+        assertThat(service.findOverdue())
+                .containsExactly(new LoanResponse(
+                        5L, 1L, "Dune", 7L, Instant.parse("2026-09-10T10:00:00Z"), LocalDate.of(2026, 9, 20), null));
     }
 
     @Test
@@ -114,6 +143,7 @@ class LoanServiceTest {
                 .isInstanceOf(ConflictException.class)
                 .hasMessage("Book 1 has no available copies");
         then(loans).should(never()).save(any());
+        then(events).shouldHaveNoInteractions();
     }
 
     @Test

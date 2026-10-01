@@ -59,6 +59,15 @@ public class SecurityConfig {
                         .permitAll()
                         .requestMatchers("/swagger-ui.html", "/swagger-ui/**", "/v3/api-docs/**")
                         .permitAll()
+                        // Actuator (§5.9): health and info for probes and humans, the rest for librarians.
+                        .requestMatchers("/actuator/health", "/actuator/health/**", "/actuator/info")
+                        .permitAll()
+                        .requestMatchers("/actuator/**")
+                        .hasRole("LIBRARIAN")
+                        // Importing calls Open Library, even the GET preview: librarians only. Before the
+                        // GET rule below, which would match it first.
+                        .requestMatchers("/api/books/import/**")
+                        .hasRole("LIBRARIAN")
                         // The catalogue: anyone logged in reads it, librarians change it.
                         .requestMatchers(HttpMethod.GET, "/api/books/**", "/api/authors/**")
                         .authenticated()
@@ -69,7 +78,7 @@ public class SecurityConfig {
                         // HEAD runs the GET handler too, and a GET-only rule would let it through.
                         .requestMatchers(HttpMethod.POST, "/api/loans")
                         .authenticated()
-                        .requestMatchers("/api/loans")
+                        .requestMatchers("/api/loans", "/api/loans/overdue")
                         .hasRole("LIBRARIAN")
                         .requestMatchers("/api/members/me", "/api/members/me/**")
                         .authenticated()

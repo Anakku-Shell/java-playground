@@ -12,6 +12,9 @@ import dev.playground.library.book.BookRepository;
 import dev.playground.library.member.Member;
 import dev.playground.library.member.MemberRepository;
 import java.io.UnsupportedEncodingException;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.LocalDate;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -45,6 +48,9 @@ class LoanControllerIT {
 
     @Autowired
     private MemberRepository members;
+
+    @Autowired
+    private LoanRepository loans;
 
     @Autowired
     private JdbcTemplate jdbc;
@@ -188,6 +194,24 @@ class LoanControllerIT {
                                 {"isbn": "9780441013593", "title": "Dune", "totalCopies": 0}
                                 """))
                 .hasStatus(HttpStatus.CONFLICT);
+    }
+
+    @Test
+    void overdueLoansAreTheActiveOnesPastTheirDueDate() {
+        // No borrow is overdue on the day it happens, so this one is written straight to the table.
+        Loan late = loans.save(new Loan(
+                dune,
+                ada,
+                Instant.now().minus(Duration.ofDays(20)),
+                LocalDate.now().minusDays(1)));
+        borrow(dune, alan); // due in 14 days
+
+        assertThat(mvc.get().uri("/api/loans/overdue"))
+                .hasStatusOk()
+                .bodyJson()
+                .extractingPath("$[*].id")
+                .asArray()
+                .containsExactly(late.getId().intValue());
     }
 
     @Test

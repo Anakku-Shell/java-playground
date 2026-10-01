@@ -117,6 +117,18 @@ class LoanRepositoryIT {
     }
 
     @Test
+    void overdueMeansActiveAndDueBeforeToday() {
+        // Due on the 15th: on the 15th itself the loan is not overdue yet.
+        assertThat(loans.findOverdue(DUE)).isEmpty();
+
+        List<Loan> overdue = loans.findOverdue(DUE.plusDays(1));
+
+        // The three active loans, not Cosmos (returned); books in the same query.
+        assertThat(overdue).extracting(loan -> loan.getBook().getTitle()).containsExactly("Dune", "Dune", "Emma");
+        assertThat(statements()).isEqualTo(2); // one per findOverdue call
+    }
+
+    @Test
     void filtersCombine() {
         assertThat(loans.findAll(LoanSpecifications.ofMember(ada.getId()), Sort.by("id")))
                 .extracting(loan -> loan.getBook().getTitle())

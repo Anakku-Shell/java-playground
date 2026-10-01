@@ -45,6 +45,13 @@ public class LoanController {
         return service.findAll(memberId, active);
     }
 
+    /** Active loans past their due date (librarians, a URL rule). Guide: §5.9 Beyond CRUD. */
+    @GetMapping("/overdue")
+    public List<LoanResponse> overdue() {
+        return service.findOverdue();
+    }
+
+    // "/overdue" is not taken for an id: Spring prefers the mapping with a literal segment.
     @GetMapping("/{id}")
     public LoanResponse get(@PathVariable @Positive Long id) {
         return service.findById(id);

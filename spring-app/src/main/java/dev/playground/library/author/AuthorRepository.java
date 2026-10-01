@@ -1,5 +1,6 @@
 package dev.playground.library.author;
 
+import java.util.Optional;
 import org.springframework.data.jpa.repository.JpaRepository;
 
 /**
@@ -8,4 +9,8 @@ import org.springframework.data.jpa.repository.JpaRepository;
  * the implementation. See {@code BookRepository} for custom queries. Guide: §5.4 Persistence with
  * JPA.
  */
-public interface AuthorRepository extends JpaRepository<Author, Long> {}
+public interface AuthorRepository extends JpaRepository<Author, Long> {
+
+    /** For the Open Library import (§5.9): names are not unique, so the oldest author with it. */
+    Optional<Author> findFirstByNameIgnoreCaseOrderByIdAsc(String name);
+}

@@ -241,6 +241,7 @@ Spring Boot inverts this: **your app owns `main()` and starts an embedded Tomcat
 - members and loans: `/api/members`, `/api/loans` (§5.5), safe when two requests race for the same book, member or loan (§5.6);
 - an audit trail of loan requests: `/api/audit-events` (§5.6);
 - registration and login, `/api/auth/*` (§5.7). Every other endpoint except `/api/info` and the API docs needs a JWT bearer token, and roles and ownership decide what it may do;
+- book import from Open Library, `/api/books/import/{isbn}`, overdue loans with a daily job, a notification after each borrow, and Actuator under `/actuator` (§5.9);
 - Swagger UI at `/swagger-ui.html`.
 
 Request bodies are validated, and every error is an RFC 9457 `ProblemDetail` (§5.3). On `spring-boot:run`, Spring Boot starts PostgreSQL in Docker and Flyway creates the schema before Tomcat opens the port. `LibraryApplicationIT` (`@SpringBootTest` on a throwaway PostgreSQL) boots the same context in a test, so a broken configuration fails the build.
@@ -1821,7 +1822,7 @@ public LoanResponse returnLoan(Long id) { ... }
 - A SpEL expression: `#id` is the parameter, `authentication` the current user, `@loanAccess` a bean by name. It runs in a proxy, like `@Transactional`, and has the same self-invocation limit (§5.6). It runs before the method and before its transaction: a refused return is not even audited.
 - `findById` uses the same check. **`@PostAuthorize`** (`returnObject.memberId() == ...`) would check the loaded loan without a second query. But then a missing loan is a 404 and someone else's a 403, and a member could probe which ids exist. With `@PreAuthorize` and `isOwner` false for missing loans, both are 403 (`LoanSecurityIT.memberCannotReadOthersLoans`). A librarian still gets the 404.
 - A borrow's member comes from the token. `CurrentMember.borrowerFor(memberId)` allows no id or your own id; a librarian may name anyone; a member naming someone else gets a 403, rather than having the field silently ignored.
-- **Secure the service, not only the URL.** A method rule holds whoever calls the method: another controller, a scheduled job (§5.9) or a test. Here only `findById` and `returnLoan` have one. `findAll` (any member's loans) relies on the URL rule, and "borrow for whom" is checked in `LoanController`. A new caller of those two service methods gets no check: give them a `@PreAuthorize` before adding one.
+- **Secure the service, not only the URL.** A method rule holds whoever calls the method: another controller, a scheduled job (§5.9) or a test. Here only `findById` and `returnLoan` have one. `findAll` (any member's loans) relies on the URL rule, and "borrow for whom" is checked in `LoanController`. A new caller of those two service methods gets no check: give them a `@PreAuthorize` before adding one. `findOverdue` (§5.9) is the opposite case, on purpose: `OverdueLoanJob` calls it with no user at all, and a `@PreAuthorize` there would refuse the job, so the URL rule on `/api/loans/overdue` is its only guard.
 
 #### 401 and 403 as ProblemDetail
 
@@ -1890,6 +1891,7 @@ Most tests are cheap and narrow; a few are expensive and wide.
 | Plain unit | none, or `@ExtendWith(MockitoExtension.class)` | Nothing: `new` the class, mock its collaborators | No | `BookServiceTest`, `LoanServiceTest`, `IsbnTest`, everything in `java-core` |
 | Web slice | `@WebMvcTest(XController.class)` | MVC infrastructure, that controller, `@ControllerAdvice`, Jackson. Services must be `@MockitoBean`s; our security config must be `@Import`ed (§5.7) | No | `BookControllerTest`, `CorsTest` |
 | JSON slice | `@JsonTest` | The application's Jackson setup + `JacksonTester` | No | `LoanResponseJsonTest` |
+| HTTP client slice | `@RestClientTest` | RestClient auto-configuration and the named client; usually `MockRestServiceServer` (§5.9 uses a real stub server instead) | No | `OpenLibraryClientTest` |
 | JPA slice | `@DataJpaTest` | JPA, Flyway, the repositories, `TestEntityManager`. Each test runs in a transaction that rolls back | Yes | `BookRepositoryIT`, `BookQueriesIT`, `LoanRepositoryIT` |
 | Full context, mock web | `@SpringBootTest` + `@AutoConfigureMockMvc` | Everything; requests go through `MockMvc`, no socket | Yes | `BookControllerIT`, `LoanSecurityIT` |
 | Full context, real server | `@SpringBootTest(webEnvironment = RANDOM_PORT)` | Everything, plus Tomcat on a free port | Yes | `ApiSmokeIT` |
@@ -1910,14 +1912,14 @@ This suite starts **9 contexts** (so 9 containers, one `@Bean` each in `Testcont
 
 | Context | Test classes |
 |---|---|
-| `@SpringBootTest` + `@AutoConfigureMockMvc` | `AuthorControllerIT`, `BookControllerIT`, `LoanControllerIT`, `LoanSecurityIT`, `LoanConcurrencyIT`, `MemberControllerIT`, `AuthControllerIT`, `JwtAuthIT` |
+| `@SpringBootTest` + `@AutoConfigureMockMvc` | `AuthorControllerIT`, `BookControllerIT`, `LoanControllerIT`, `LoanSecurityIT`, `LoanConcurrencyIT`, `MemberControllerIT`, `AuthControllerIT`, `JwtAuthIT`, `LoanEventsIT`, `ActuatorIT` |
 | `RANDOM_PORT` | `ApiSmokeIT` |
 | plain `@SpringBootTest` | `LibraryApplicationIT` |
 | the dev profile | `DemoDataIT` |
 | `webEnvironment = NONE` + its own beans | `TransactionBehaviourIT` |
 | `@DataJpaTest` + 4 different setups | `BookRepositoryIT`, `BookQueriesIT` (imports `BookService`, has a spy), `LoanRepositoryIT` (statistics on), `AuditingIT` (mocks the `Clock`) |
 
-`@WithMockUser` is not part of the key (it acts per test), so the eight MockMvc classes share one context. Adding one `@MockitoBean` to one of them would split it off and cost a context.
+`@WithMockUser` is not part of the key (it acts per test), so the ten MockMvc classes share one context. Adding one `@MockitoBean` to one of them would split it off and cost a context.
 
 **One container for the whole run?** Make the container a static field, which exists once per JVM, and let `@ImportTestcontainers` hand it to every context:
 
@@ -2014,7 +2016,7 @@ Security in tests (`@WithMockUser`, `jwt()`, real tokens) is in §5.7.
 
 **Coverage.** `./mvnw verify` writes `spring-app/target/site/jacoco/index.html`: lines and branches per package, class and method, with the source coloured by what ran. JaCoCo's agent rides on the `argLine` that Surefire and Failsafe already pass to their JVMs, and the report runs in `post-integration-test`, so it counts both kinds of test. The agent *appends* to `target/jacoco.exec`, so the report also counts every earlier build since the last `clean`. Run `./mvnw clean verify` when the numbers matter. No threshold is enforced: read the report for untested branches, not for the percentage.
 
-**Time.** A full `./mvnw verify` takes about 55 seconds on the machine this guide was written on (Docker already running, images pulled): `java-core` about 2 s, the `spring-app` unit tests about 10 s, and most of the rest goes on starting the 9 contexts and their containers. At the end of this chapter the report shows about 97 % of lines and 80 % of branches covered.
+**Time.** A full `./mvnw verify` takes about a minute on the machine this guide was written on (55 s when this section was written, 60 s with the tests of §5.9) (Docker already running, images pulled): `java-core` about 2 s, the `spring-app` unit tests about 10 s, and most of the rest goes on starting the 9 contexts and their containers. At the end of this chapter the report shows about 97 % of lines and 80 % of branches covered.
 
 **Where it is in the code:** `spring-app/src/test/java/dev/playground/library/` (`testing/TestDataFactory`, `TestTables`, `TestUsers`, `TestcontainersConfiguration`, `ApiSmokeIT`), `spring-app/src/test/resources/sql/`, the JaCoCo plugin in `spring-app/pom.xml`.
 
@@ -2028,7 +2030,205 @@ Security in tests (`@WithMockUser`, `jwt()`, real tokens) is in §5.7.
 
 ### 5.9 Beyond CRUD
 
-_Written in Phase 12._
+**What it is.** The parts of a real backend that are not "read a row, write a row": calling another service over HTTP, caching, jobs on a timer, work on another thread, reacting to events, and exposing the application's health and numbers. Each one is a Spring abstraction you switch on with one `@Enable…` annotation or one starter, and each brings one new way to get things wrong, which this section names.
+
+**In this project.**
+- `POST /api/books/import/{isbn}` (librarians) adds a book from [Open Library](https://openlibrary.org): title, year and authors, one copy. `GET` on the same URL is a preview that saves nothing. Code: `openlibrary/` and `book/BookImportService`.
+- `GET /api/loans/overdue` (librarians), and `loan/OverdueLoanJob`, which logs the overdue loans every morning.
+- Every borrow publishes a `LoanCreatedEvent`; `notification/LoanNotificationListener` "notifies the member" (a log line) after the commit, on another thread.
+- The Open Library lookups are cached.
+- `/actuator/health`, `/actuator/info` and `/actuator/metrics`.
+
+Try them with `spring-app/http/12-beyond-crud.http`. The import needs internet; the tests never call Open Library.
+
+#### Calling another service: RestClient and HTTP interfaces
+
+Spring has had four HTTP clients:
+
+| Client | Style | Use it for |
+|---|---|---|
+| `RestTemplate` | Blocking, one method per verb (`getForObject`…) | Reading old code. In maintenance mode |
+| `WebClient` | Reactive (`Mono`/`Flux`), from Spring WebFlux | Reactive applications |
+| `RestClient` (Spring 6.1) | Blocking, fluent | Calls written by hand |
+| HTTP interfaces (`@HttpExchange`) | Declarative: an interface, Spring writes the class | A remote API you call in several places |
+
+With virtual threads (§4.3) a blocking client is cheap, so a servlet application like this one has no reason to go reactive for its HTTP calls.
+
+`RestClient` by hand, with the timeouts this project uses. `RestClient.Builder` is a bean Boot configures: inject it rather than calling `RestClient.builder()`, so metrics and customizers apply.
+
+```java
+RestClient openLibrary = builder
+        .baseUrl("https://openlibrary.org")
+        .requestFactory(ClientHttpRequestFactoryBuilder.jdk()
+                .build(HttpClientSettings.defaults()
+                        .withConnectTimeout(Duration.ofSeconds(2))
+                        .withReadTimeout(Duration.ofSeconds(5))))
+        .build();
+
+Edition edition = openLibrary.get()
+        .uri("/isbn/{isbn}.json", isbn)
+        .retrieve()                 // 4xx and 5xx become exceptions
+        .body(Edition.class);       // JSON -> record, with Jackson
+```
+
+The project uses the declarative form instead. `OpenLibraryApi` is an interface whose methods carry the URL; Spring generates the implementation, the way Spring Data generates a repository:
+
+```java
+@HttpExchange(accept = "application/json")
+interface OpenLibraryApi {
+    @GetExchange("/isbn/{isbn}.json")
+    Edition edition(@PathVariable String isbn);
+    // ...
+}
+```
+
+Boot 4 registers it with one annotation, `@ImportHttpServices(group = "openlibrary", types = OpenLibraryApi.class)` (`OpenLibraryConfig`). Each **group** of interfaces gets its own `RestClient`, configured from properties:
+
+```yaml
+spring.http.serviceclient.openlibrary:
+  base-url: https://openlibrary.org
+  connect-timeout: 2s     # to reach the server at all
+  read-timeout: 5s        # to wait for an answer once connected
+```
+
+Before Boot 4 you wrote the `HttpServiceProxyFactory` bean by hand. Boot picks the underlying HTTP library: Apache HttpClient, Jetty or Reactor Netty if one is on the classpath, else the JDK's `java.net.http.HttpClient` (this project). Boot also sets it to follow redirects (`spring.http.clients.redirects`, default "follow when possible"), which matters here: Open Library answers `/isbn/{isbn}.json` with a 302 to the edition's own URL. A raw JDK `HttpClient` does **not** follow redirects, and neither does a `RestClient.create()` built without Boot's builder: the 302 is not an error status, so `body()` returns `null`. One more reason to inject Boot's `RestClient.Builder`.
+
+**One timeout per request, not per operation.** The connect and read timeouts apply to each HTTP request. An import makes one request for the edition (plus the redirect) and one per author, so with three authors a server answering every call in 4.9 s keeps the import waiting about 20 s, and no timeout fires. When the whole operation needs a deadline, add one around it (for example `CompletableFuture.supplyAsync(...).orTimeout(...)`), or give up on the optional parts (the authors) first.
+
+**Timeouts are not optional.** Without a read timeout, a server that accepts the connection and never answers holds the request thread until someone restarts the application. `OpenLibraryClientTest.timeoutMapsTo502` points the client at a server that waits 3 s, with a 300 ms read timeout, and checks that the call fails in under 2 s.
+
+**Error mapping.** `retrieve()` throws `HttpClientErrorException` for a 4xx (with subclasses such as `HttpClientErrorException.NotFound`), `HttpServerErrorException` for a 5xx, and `ResourceAccessException` for I/O errors and timeouts. All of them are `RestClientException`s. `OpenLibraryClient` wraps the generated interface and decides what they mean here:
+
+| Open Library | `OpenLibraryClient` | Our API |
+|---|---|---|
+| 200 with the edition (after the redirect) | `Optional.of(book)`, after one more request per author | 201 |
+| 404 for the ISBN | `Optional.empty()` | 404 |
+| Timeout, refused connection, 5xx, HTML instead of JSON, an empty answer, an edition without a title | `ExternalServiceException` | 502 Bad Gateway |
+| An author without a name (a merged author answers with a redirect record) | That author is left out, with a warning in the log | 201, without that author |
+
+A 502 says "a server I depend on failed": the truth, and a hint that retrying later may work. The cause goes to the log, not to the response. The wrapper also keeps Open Library's JSON shape (`OpenLibraryApi.Edition`, with its `publish_date` text) inside the package: the rest of the code sees our `OpenLibraryBook` record. Open Library's data is uneven. Dates are free text ("August 2, 2005"), so `yearIn` takes the first four-digit number, and some editions list no authors (they sit on the "work", which this project does not read).
+
+**Testing an HTTP client.** `OpenLibraryClientTest` runs a real HTTP server on a free port (`OpenLibraryStub`, built on the JDK's `com.sun.net.httpserver`) and points the client at it with `@DynamicPropertySource`. `@RestClientTest` is the slice for HTTP clients. It usually comes with `MockRestServiceServer`, which replaces the client's transport with expectations: quicker to write, but it never opens a socket, so it cannot show a timeout or a followed redirect. WireMock is the usual library for a stub server; the JDK server is enough here and adds no dependency.
+
+**No transaction around a remote call.** A transaction holds a database connection from its first query to its commit. `@Transactional` on `importBook` would hold one for as long as Open Library takes (a read timeout per request, several requests per import), and a handful of slow imports would empty the connection pool (10 connections by default) for every other request. So `BookImportService` has no `@Transactional`: it checks for a duplicate ISBN, calls Open Library, and only then writes inside a `TransactionTemplate`:
+
+```java
+OpenLibraryBook found = find(isbn13);                 // network, no transaction
+return transaction.execute(status -> save(found));    // short read-write transaction
+```
+
+`TransactionTemplate` is the programmatic form of `@Transactional`, for when the boundary sits in the middle of a method. `BookImportServiceTest.asksOpenLibraryBeforeOpeningTheTransaction` pins the order. Authors are matched by name ("Frank Herbert" from Open Library is the demo data's Frank Herbert); a real catalogue would store Open Library's id in a column and match on that.
+
+#### Caching
+
+```java
+@Cacheable(cacheNames = "open-library", unless = "#result == null")
+public Optional<OpenLibraryBook> findBook(String isbn13) { ... }
+```
+
+`@EnableCaching` (`config/CachingConfig`) wraps such beans in a proxy. The proxy builds a key from the arguments (here the ISBN), returns the cached value if there is one, and otherwise runs the method and stores the result. For an `Optional`, Spring caches what is inside, so `#result` is the book or `null`: `unless` keeps "not found" out of the cache, because Open Library may add the book later. An exception is never cached. On the running application the first preview of an ISBN took about 1 s and the second about 4 ms, and `/actuator/metrics/http.client.requests` counted one request after two previews and the import.
+
+With no cache library on the classpath, Boot's `CacheManager` keeps each cache in a `ConcurrentHashMap`: no expiry, no size limit, one copy per instance. Add Caffeine and set `spring.cache.caffeine.spec=maximumSize=500,expireAfterWrite=1h` for a bounded local cache, or Redis for one shared by every instance; the annotations stay the same. `spring.cache.cache-names: open-library` fixes the list of caches, so a typo in `cacheNames` fails ("Cannot find cache named …", on the first call, not at startup) instead of quietly creating a new cache.
+
+**What not to cache.** The usual first example is the entity read:
+
+```java
+@Cacheable("books")
+public BookResponse findById(Long id) { ... }
+
+@CacheEvict(cacheNames = "books", key = "#id")
+public BookResponse update(Long id, UpdateBookRequest request) { ... }
+```
+
+This project does not do it. A `BookResponse` carries `availableCopies`, which every borrow and return changes in `LoanService`, and author names, which `AuthorService` changes. Each of those would need its own eviction, and a forgotten one serves stale data without an error. The tests that truncate the tables between runs (§5.8) would also read books that no longer exist. Cache what is slow and rarely changes (a remote lookup, reference data), and let a cheap query by primary key stay a query.
+
+Caching works through a proxy, like `@Transactional` (§5.6): a call from inside the same class skips the cache. That is also why `OpenLibraryCachingTest` needs a small Spring context: the client, the real `CachingConfig`, and `@AutoConfigureCache(cacheProvider = CacheType.SIMPLE)`. In tests that annotation defaults to a no-op cache, so the type has to be named.
+
+#### Scheduling
+
+```java
+@Scheduled(cron = "${library.jobs.overdue-cron:0 0 8 * * *}")
+public void reportOverdueLoans() { ... }
+```
+
+`@EnableScheduling` (`config/SchedulingConfig`) runs `@Scheduled` methods on Spring's scheduler. Besides `cron` there are `fixedRate = 60_000` (every minute, counted from each start) and `fixedDelay` (counted from each end). A Spring cron has **six** fields, seconds first (Unix cron has five):
+
+```
+ ┌───────────── second (0-59)
+ │ ┌─────────── minute (0-59)
+ │ │ ┌───────── hour (0-23)
+ │ │ │ ┌─────── day of month (1-31)
+ │ │ │ │ ┌───── month (1-12 or JAN-DEC)
+ │ │ │ │ │ ┌─── day of week (0-7 or MON-SUN)
+ 0 0 8 * * *            every day at 08:00:00
+ 0 */15 * * * MON-FRI   every 15 minutes on weekdays
+```
+
+The `${…:default}` placeholder lets configuration change the schedule, and the value `"-"` disables it. The test configuration sets that, so no job fires in the middle of a test; `OverdueLoanJobTest` calls the method directly and reads what it logged with `OutputCaptureExtension`. The overdue rule itself (active, and due before today by the injected `Clock`) is in `LoanService.findOverdue`, tested with a fixed clock.
+
+Three things to know. The scheduler has one thread by default (`spring.task.scheduling.pool.size`), so a slow job delays the others. A job runs with no request and no logged-in user, so a `@PreAuthorize` method would refuse it. And every running instance of the application runs every job: with two instances the report is logged twice. ShedLock (a lock row in the database) or a single scheduler instance solves that; Quartz is the heavier option, with persistent jobs and clustering.
+
+#### `@Async` and executors
+
+`@Async` on a method makes the call return at once while the method runs on another thread. `@EnableAsync` switches it on; `config/AsyncConfig` implements `AsyncConfigurer` to choose the executor:
+
+```java
+SimpleAsyncTaskExecutor executor = new SimpleAsyncTaskExecutor("async-");
+executor.setVirtualThreads(true);   // one virtual thread per task: no pool to size
+```
+
+Without it, Boot's own executor is used: a pool of 8 platform threads, or virtual threads when `spring.threads.virtual.enabled=true`. That property also moves Tomcat's request threads and the scheduler onto virtual threads, a bigger change than this chapter needs. `AsyncConfig` also sets an `AsyncUncaughtExceptionHandler`, because a `void` `@Async` method has no caller left to throw to. A method that returns `CompletableFuture<T>` hands its result, or its exception, to the caller instead.
+
+Like `@Transactional` and `@Cacheable`, `@Async` is a proxy: a call from the same class runs synchronously. And the new thread does not inherit the caller's transaction, `SecurityContext` or MDC (the log context).
+
+#### Application events
+
+```java
+// LoanService.borrow, inside its transaction
+events.publishEvent(new LoanCreatedEvent(loan.getId(), book.getId(), book.getTitle(), member.getId(), dueDate));
+
+// LoanNotificationListener
+@Async
+@TransactionalEventListener            // phase = AFTER_COMMIT
+public void onLoanCreated(LoanCreatedEvent event) { ... }
+```
+
+`ApplicationEventPublisher` is in-process publish/subscribe: the service announces what happened and does not know who listens. Any object can be an event. A record of ids and plain values is safest, because a listener on another thread must not touch lazy entities.
+
+When the listener runs is the important choice:
+
+| Listener | Runs | If the transaction rolls back |
+|---|---|---|
+| `@EventListener` | At once, on the publisher's thread, inside its transaction | It has already run: the member was told about a loan that does not exist |
+| `@TransactionalEventListener` (`AFTER_COMMIT`, the default) | After the commit | Never runs |
+| … `phase = BEFORE_COMMIT` / `AFTER_ROLLBACK` / `AFTER_COMPLETION` | Just before the commit, still inside it / after a rollback / after either | |
+
+A `@TransactionalEventListener` drops an event published with **no** transaction active, without a warning, unless it sets `fallbackExecution = true`. `LoanEventsIT` shows all of this against the real context: the notification appears after the commit on an `async-` thread, never for a rolled-back transaction, and never for an event published outside one. It started red against a plain `@EventListener`, which fails three of its four tests.
+
+`AFTER_COMMIT` + `@Async` leaves a gap: if the process dies between the commit and the listener, the notification is lost. When that is not acceptable, write the event to an "outbox" table in the same transaction and have a job (or a tool such as Debezium) send it on; a message broker (§5.10) is where such events usually go.
+
+#### Actuator
+
+`spring-boot-starter-actuator` adds production endpoints under `/actuator`. Only `health` is exposed over HTTP by default; this project exposes three, and Spring Security decides who reads them:
+
+```yaml
+management:
+  endpoints.web.exposure.include: health,info,metrics
+  endpoint.health:
+    show-details: when-authorized
+    roles: LIBRARIAN
+  info.java.enabled: true
+```
+
+| Endpoint | Shows | Who |
+|---|---|---|
+| `/actuator/health` | `UP` or `DOWN`, plus each check (database, disk space…) for a librarian. Boot 4 also lists the `liveness` and `readiness` groups, served at `/actuator/health/liveness` and `/readiness` for Kubernetes probes | Anyone |
+| `/actuator/info` | The build (the `build-info` goal of `spring-boot-maven-plugin`: artifact, version, time) and the Java version | Anyone |
+| `/actuator/metrics` | Micrometer metrics: `jvm.memory.used`, `http.server.requests`, `http.client.requests` (the Open Library calls), `hikaricp.connections.active`… `/actuator/metrics/{name}?tag=uri:/api/books` filters by tag | Librarians |
+
+Why not expose everything? `env` and `configprops` list every configuration key; since Boot 3 every value shows as `******` by default, but `management.endpoint.env.show-values: always` (or `when-authorized`) reveals all of them in plain text, secrets included, unless you add a `SanitizingFunction` (Boot 2 masked only keys that looked secret, such as `password`). `beans` maps the application's internals, and `heapdump` hands over the memory, passwords and tokens included. Expose what you use, and secure what you expose. In production the management endpoints often move to a separate port (`management.server.port`) that only the internal network reaches, and metrics are scraped rather than read by hand: add `micrometer-registry-prometheus` and a Prometheus server reads `/actuator/prometheus`.
+
+**Tests in this chapter:** `OpenLibraryClientTest` (stub server, timeout), `OpenLibraryCachingTest`, `BookImportServiceTest`, the import cases in `BookControllerTest` (201, 400, 403, 502), the overdue cases in `LoanServiceTest`, `LoanRepositoryIT`, `LoanControllerIT` and `LoanSecurityIT`, `OverdueLoanJobTest`, `LoanEventsIT` and `ActuatorIT`. The last two have the same setup as the other MockMvc ITs, so they share that context and start no container (§5.8).
 
 ### 5.10 Kafka
 
@@ -2181,6 +2381,14 @@ A map for orientation, not a claim that the pieces are identical. It grows with 
 | `AddCors` + `UseCors` | `CorsConfigurationSource` bean + `.cors(...)` in the chain | |
 | Antiforgery tokens | Spring Security's CSRF protection (on by default) | Off for a bearer-token API in both |
 | User secrets / environment variables for signing keys | Profile-specific YAML for dev, environment variables elsewhere | `LIBRARY_SECURITY_JWT_SECRET` ↔ `library.security.jwt.secret` |
+| `HttpClient` + `IHttpClientFactory`, Refit | `RestClient`, HTTP interfaces (`@HttpExchange` + `@ImportHttpServices`) | Refit is the closest match to an HTTP interface; named clients ↔ service groups |
+| `HttpClient.Timeout`, Polly timeouts | `spring.http.serviceclient.<group>.connect-timeout` / `read-timeout` | `HttpClient` has one 100 s timeout by default; the JDK client has no read timeout unless you set one |
+| `IMemoryCache` / `IDistributedCache`, output caching | `@Cacheable` / `@CacheEvict` + a `CacheManager` (in-memory, Caffeine, Redis) | Spring caches method results declaratively, through a proxy |
+| `BackgroundService` with a `PeriodicTimer`, Hangfire, Quartz.NET | `@Scheduled` (`cron`, `fixedRate`, `fixedDelay`), Quartz | |
+| `Task.Run` / a queued background work item | `@Async` + an executor | |
+| MediatR notifications, domain events dispatched after `SaveChanges` | `ApplicationEventPublisher` + `@EventListener` / `@TransactionalEventListener` | |
+| Health checks (`AddHealthChecks`, `MapHealthChecks`) | Actuator `/actuator/health` | |
+| `System.Diagnostics.Metrics`, OpenTelemetry | Micrometer, `/actuator/metrics` | |
 
 **LINQ ↔ Streams**
 
@@ -2235,5 +2443,8 @@ A map for orientation, not a claim that the pieces are identical. It grows with 
 - **Security is not the MVC pipeline.** The filters run before Spring MVC, so `@RestControllerAdvice` never sees a 401 or 403 from them unless you route it there, as `SecurityProblemHandler` does (§5.7).
 - **A record's `toString` prints every field.** A request record with a password ends up in a log with it. Override `toString` (§5.7).
 - **`./mvnw test` skips the integration tests.** `dotnet test` runs every test project. Maven splits them: Surefire runs `*Test` in `test`, Failsafe runs `*IT` in `verify` (§5.8).
+- **`@Async`, `@Cacheable` and `@Transactional` share one blind spot.** All three are proxies: a call from inside the same class skips them, so the method runs synchronously, uncached or without a transaction, and nothing says so (§5.6, §5.9).
+- **A `@TransactionalEventListener` ignores events published outside a transaction.** No error, and nothing logged above DEBUG: the listener just never runs (§5.9).
+- **A Spring cron has six fields.** `0 8 * * *` from a Unix crontab fails to parse; the seconds come first: `0 0 8 * * *` (§5.9).
 - **Pages start at 0.** `?page=1` is the second page.
 - **The schema is not generated from the classes.** Flyway runs your SQL; Hibernate only validates. Adding a field to an entity means writing a migration too, or the app does not start.

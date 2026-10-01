@@ -30,7 +30,7 @@ The API needs a JWT signing secret. The dev profile brings a dev-only one; witho
 
 **Demo users** (dev profile only, password `demo-password` for all): `librarian@library.test` (LIBRARIAN), and `ada@library.test`, `alan@library.test`, `grace@library.test` (MEMBER). Log in with `POST /api/auth/login` and send the returned token as `Authorization: Bearer <token>`; `spring-app/http/10-security.http` shows how. These credentials exist only for local learning.
 
-With Docker Desktop running, `spring-boot:run` starts PostgreSQL by itself (`spring-app/compose.yaml`), and `verify` runs the integration tests on throwaway containers. `docker compose -f spring-app/compose.yaml down -v` deletes the local data. `verify` also writes a coverage report to `spring-app/target/site/jacoco/index.html`.
+With Docker Desktop running, `spring-boot:run` starts PostgreSQL by itself (`spring-app/compose.yaml`), and `verify` runs the integration tests on throwaway containers. `docker compose -f spring-app/compose.yaml down -v` deletes the local data. `verify` also writes a coverage report to `spring-app/target/site/jacoco/index.html`. With the app running, `/actuator/health` and `/actuator/info` are public; the book import (`spring-app/http/12-beyond-crud.http`) calls openlibrary.org, so it needs internet.
 
 On PowerShell, use `.\mvnw` instead of `./mvnw`.
 

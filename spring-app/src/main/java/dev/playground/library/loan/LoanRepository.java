@@ -1,5 +1,6 @@
 package dev.playground.library.loan;
 
+import java.time.LocalDate;
 import java.util.Collection;
 import java.util.List;
 import org.springframework.data.domain.Sort;
@@ -35,6 +36,14 @@ public interface LoanRepository extends JpaRepository<Loan, Long>, JpaSpecificat
             where l.book.id in :bookIds and l.returnedAt is null
             group by l.book.id""")
     List<ActiveLoanCount> countActiveByBookIds(Collection<Long> bookIds);
+
+    /**
+     * Active loans due before {@code today}: a loan due today is not overdue yet. The books come in
+     * the same query, for their titles. Guide: §5.9 Beyond CRUD.
+     */
+    @EntityGraph(attributePaths = "book")
+    @Query("select l from Loan l where l.returnedAt is null and l.dueDate < :today order by l.dueDate, l.id")
+    List<Loan> findOverdue(LocalDate today);
 
     /**
      * Overridden only to add the entity graph: every loan in the list needs its book's title, so the

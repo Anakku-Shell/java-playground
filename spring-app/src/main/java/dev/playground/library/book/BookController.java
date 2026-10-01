@@ -3,7 +3,9 @@ package dev.playground.library.book;
 import dev.playground.library.book.dto.BookResponse;
 import dev.playground.library.book.dto.CreateBookRequest;
 import dev.playground.library.book.dto.UpdateBookRequest;
+import dev.playground.library.book.validation.ValidIsbn;
 import dev.playground.library.common.PageResponse;
+import dev.playground.library.openlibrary.OpenLibraryBook;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Positive;
 import java.net.URI;
@@ -25,16 +27,18 @@ import org.springframework.web.servlet.support.ServletUriComponentsBuilder;
 
 /**
  * HTTP only, like {@code AuthorController}: maps requests to service calls and picks the status
- * codes. Guide: §5.2 REST API.
+ * codes. Guide: §5.2 REST API, §5.9 Beyond CRUD (import).
  */
 @RestController
 @RequestMapping("/api/books")
 public class BookController {
 
     private final BookService service;
+    private final BookImportService importService;
 
-    public BookController(BookService service) {
+    public BookController(BookService service, BookImportService importService) {
         this.service = service;
+        this.importService = importService;
     }
 
     /**
@@ -77,5 +81,26 @@ public class BookController {
     @ResponseStatus(HttpStatus.NO_CONTENT)
     public void delete(@PathVariable @Positive Long id) {
         service.delete(id);
+    }
+
+    /** What {@code POST} would import from Open Library, without saving it (§5.9). */
+    @GetMapping("/import/{isbn}")
+    public OpenLibraryBook previewImport(@PathVariable @ValidIsbn String isbn) {
+        return importService.preview(isbn);
+    }
+
+    /**
+     * Adds the book with this ISBN from Open Library, with one copy (§5.9). 404 when Open Library
+     * does not know it, 502 when it cannot be reached in time.
+     */
+    @PostMapping("/import/{isbn}")
+    public ResponseEntity<BookResponse> importBook(@PathVariable @ValidIsbn String isbn) {
+        BookResponse created = importService.importBook(isbn);
+        // The new book's own URL, not one under /import (fromCurrentRequest would build that).
+        URI location = ServletUriComponentsBuilder.fromCurrentContextPath()
+                .path("/api/books/{id}")
+                .buildAndExpand(created.id())
+                .toUri();
+        return ResponseEntity.created(location).body(created);
     }
 }

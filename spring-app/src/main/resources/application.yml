@@ -20,6 +20,10 @@ spring:
     # "works" in controllers while firing hidden queries there. Off, and data is loaded in the
     # service layer on purpose (§5.5 shows the LazyInitializationException this exposes).
     open-in-view: false
+  # Only these caches exist: a @Cacheable naming another one fails instead of quietly creating it.
+  # Guide: §5.9 Beyond CRUD.
+  cache:
+    cache-names: open-library
   data:
     web:
       pageable:
@@ -38,3 +42,29 @@ server:
 # their @DefaultValue defaults apply (max-active 3, duration-days 14).
 library:
   name: Playground Library
+
+# The HTTP client behind OpenLibraryApi (one "group" of HTTP interfaces, OpenLibraryConfig). Two
+# timeouts: connect, to reach the server at all; read, to wait for an answer once connected.
+# Without them a request waits for as long as the server takes. Guide: §5.9 Beyond CRUD.
+spring.http.serviceclient.openlibrary:
+  base-url: https://openlibrary.org
+  connect-timeout: 2s
+  read-timeout: 5s
+
+# Actuator (§5.9): production endpoints under /actuator. Only these three go over HTTP; the rest
+# (env, beans, heapdump...) can reveal configuration or memory, so they stay off. Who may read them
+# is in SecurityConfig: health and info for anyone, metrics for librarians.
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      # Anyone gets UP or DOWN; a librarian also sees each check (database, disk space...).
+      show-details: when-authorized
+      roles: LIBRARIAN
+  info:
+    # The Java version in /actuator/info, next to the build (build-info.properties).
+    java:
+      enabled: true

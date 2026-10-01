@@ -8,3 +8,11 @@ library:
     jwt:
       # Only for the test suite. Real secrets never go in a committed file.
       secret: test-suite-only-secret-0123456789abcdef
+  jobs:
+    # "-" disables a cron: the overdue job (§5.9) never fires in the middle of a test. Its tests call
+    # the method directly.
+    overdue-cron: "-"
+
+# Tests never call Open Library: OpenLibraryClientTest has its own stub server. Anything else that
+# tried would fail at once (nothing listens on port 1) instead of reaching the internet.
+spring.http.serviceclient.openlibrary.base-url: http://localhost:1

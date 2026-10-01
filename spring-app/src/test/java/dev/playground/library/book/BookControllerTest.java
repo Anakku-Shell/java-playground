@@ -11,8 +11,10 @@ import dev.playground.library.book.dto.BookResponse;
 import dev.playground.library.book.dto.CreateBookRequest;
 import dev.playground.library.book.dto.UpdateBookRequest;
 import dev.playground.library.common.ConflictException;
+import dev.playground.library.common.ExternalServiceException;
 import dev.playground.library.common.NotFoundException;
 import dev.playground.library.common.PageResponse;
+import dev.playground.library.openlibrary.OpenLibraryBook;
 import dev.playground.library.security.JwtConfig;
 import dev.playground.library.security.SecurityConfig;
 import java.util.List;
@@ -46,6 +48,9 @@ class BookControllerTest {
 
     @MockitoBean
     private BookService service;
+
+    @MockitoBean
+    private BookImportService importService;
 
     private static PageResponse<BookResponse> onePage(BookResponse... books) {
         return new PageResponse<>(List.of(books), 0, 20, books.length, 1);
@@ -386,5 +391,65 @@ class BookControllerTest {
                 .isEqualTo("You are not allowed to do this.");
         // The rule stopped the request before the controller: nothing was deleted.
         verify(service, never()).delete(1L);
+    }
+
+    // Import from Open Library (§5.9). The ISBN is a path variable, validated like the body's.
+
+    @Test
+    void importReturns201WithTheLocationOfTheNewBook() {
+        given(importService.importBook("0-441-01359-7")).willReturn(DUNE);
+
+        // The book lives at /api/books/1, not under the /import URL that created it.
+        assertThat(mvc.post().uri("/api/books/import/0-441-01359-7"))
+                .hasStatus(HttpStatus.CREATED)
+                .hasHeader("Location", "http://localhost/api/books/1");
+    }
+
+    @Test
+    void previewShowsWhatAnImportWouldCreate() {
+        given(importService.preview("9780441013593"))
+                .willReturn(new OpenLibraryBook(
+                        "9780441013593", "Dune", 2005, List.of(new OpenLibraryBook.Author("Frank Herbert", 1920))));
+
+        assertThat(mvc.get().uri("/api/books/import/9780441013593"))
+                .hasStatusOk()
+                .bodyJson()
+                .isStrictlyEqualTo("""
+                        {"isbn": "9780441013593", "title": "Dune", "publishedYear": 2005,
+                         "authors": [{"name": "Frank Herbert", "birthYear": 1920}]}
+                        """);
+    }
+
+    @Test
+    void importOfAnInvalidIsbnIs400() {
+        assertThat(mvc.post().uri("/api/books/import/9780441013594"))
+                .hasStatus(HttpStatus.BAD_REQUEST)
+                .bodyJson()
+                .extractingPath("$.errors")
+                .isEqualTo(Map.of("isbn", List.of("must be a valid ISBN-10 or ISBN-13")));
+        verifyNoInteractions(importService);
+    }
+
+    @Test
+    void openLibraryUnavailableIs502() {
+        given(importService.importBook("9780441013593"))
+                .willThrow(new ExternalServiceException("Open Library", new RuntimeException("Read timed out")));
+
+        // The cause (a timeout here) goes to the log only.
+        assertThat(mvc.post().uri("/api/books/import/9780441013593"))
+                .hasStatus(HttpStatus.BAD_GATEWAY)
+                .hasContentType(MediaType.APPLICATION_PROBLEM_JSON)
+                .bodyJson()
+                .extractingPath("$.detail")
+                .isEqualTo("Open Library is unavailable");
+    }
+
+    @Test
+    @WithMockUser(roles = "MEMBER")
+    void onlyALibrarianImportsOrPreviews() {
+        // The preview is a GET, but it calls Open Library: not part of the catalogue members read.
+        assertThat(mvc.get().uri("/api/books/import/9780441013593")).hasStatus(HttpStatus.FORBIDDEN);
+        assertThat(mvc.post().uri("/api/books/import/9780441013593")).hasStatus(HttpStatus.FORBIDDEN);
+        verifyNoInteractions(importService);
     }
 }

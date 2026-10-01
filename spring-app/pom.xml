@@ -71,6 +71,26 @@
             <artifactId>spring-boot-starter-security-oauth2-resource-server</artifactId>
         </dependency>
 
+        <!-- RestClient and HTTP interfaces (@HttpExchange) for calling other services: Open Library
+             (§5.9). Boot configures the underlying HTTP client (here the JDK HttpClient). -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-restclient</artifactId>
+        </dependency>
+
+        <!-- The cache abstraction (@Cacheable). With no cache library on the classpath, Boot uses an
+             in-memory ConcurrentHashMap per cache. Guide: §5.9. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-cache</artifactId>
+        </dependency>
+
+        <!-- Production endpoints under /actuator: health, info, metrics... (§5.9). -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+
         <!-- The JDBC driver: only needed at runtime, the code never imports it. -->
         <dependency>
             <groupId>org.postgresql</groupId>
@@ -123,6 +143,24 @@
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-security-oauth2-resource-server-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- Test starters paired with restclient (@RestClientTest, MockRestServiceServer), cache and
+             actuator (start.spring.io adds them). -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-restclient-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-cache-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator-test</artifactId>
             <scope>test</scope>
         </dependency>
 
@@ -203,10 +241,18 @@
                     </execution>
                 </executions>
             </plugin>
-            <!-- Adds `spring-boot:run` and repackages the jar into an executable "fat jar". -->
+            <!-- Adds `spring-boot:run` and repackages the jar into an executable "fat jar". build-info writes
+                 META-INF/build-info.properties (artifact, version, build time), which /actuator/info shows (§5.9). -->
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>build-info</goal>
+                        </goals>
+                    </execution>
+                </executions>
             </plugin>
         </plugins>
     </build>

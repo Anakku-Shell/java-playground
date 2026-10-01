@@ -14,6 +14,7 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.temporal.ChronoUnit;
 import java.util.List;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.data.domain.Sort;
 import org.springframework.data.jpa.domain.Specification;
 import org.springframework.security.access.prepost.PreAuthorize;
@@ -26,7 +27,8 @@ import org.springframework.transaction.annotation.Transactional;
  * {@code library.loans.duration-days} after today, and a loan is returned once. Each broken rule is
  * a {@code ConflictException} (409). Reads run in the class-level read-only transaction; borrow and
  * return are read-write, and their races are closed with optimistic locking. Guide: §5.5 Advanced
- * JPA, §5.6 Transactions, §5.7 Security (who may read and return a loan).
+ * JPA, §5.6 Transactions, §5.7 Security (who may read and return a loan), §5.9 Beyond CRUD (the
+ * event a borrow publishes, the overdue loans).
  */
 @Service
 @Transactional(readOnly = true)
@@ -38,6 +40,7 @@ public class LoanService {
     private final LibraryProperties.Loans rules;
     private final Clock clock;
     private final AuditService audit;
+    private final ApplicationEventPublisher events;
 
     public LoanService(
             LoanRepository loans,
@@ -45,13 +48,15 @@ public class LoanService {
             MemberRepository members,
             LibraryProperties properties,
             Clock clock,
-            AuditService audit) {
+            AuditService audit,
+            ApplicationEventPublisher events) {
         this.loans = loans;
         this.books = books;
         this.members = members;
         this.rules = properties.loans();
         this.clock = clock;
         this.audit = audit;
+        this.events = events;
     }
 
     /**
@@ -82,7 +87,10 @@ public class LoanService {
 
         // The clock's zone decides which day "today" is.
         LocalDate dueDate = LocalDate.now(clock).plusDays(rules.durationDays());
-        return LoanMapper.toResponse(loans.save(new Loan(book, member, now(), dueDate)));
+        Loan loan = loans.save(new Loan(book, member, now(), dueDate));
+        // Delivered to @TransactionalEventListener methods only if this transaction commits (§5.9).
+        events.publishEvent(new LoanCreatedEvent(loan.getId(), book.getId(), book.getTitle(), member.getId(), dueDate));
+        return LoanMapper.toResponse(loan);
     }
 
     /**
@@ -119,6 +127,18 @@ public class LoanService {
         Specification<Loan> filters =
                 Specification.allOf(LoanSpecifications.ofMember(memberId), LoanSpecifications.active(active));
         return loans.findAll(filters, Sort.by("id")).stream()
+                .map(LoanMapper::toResponse)
+                .toList();
+    }
+
+    /**
+     * Active loans past their due date, oldest first, for librarians and {@code OverdueLoanJob}.
+     * "Today" is the clock's date, like the due date of a borrow. No {@code @PreAuthorize}, unlike
+     * {@code findById}: the job calls it with no user at all, so the URL rule on
+     * {@code /api/loans/overdue} is its only guard (§5.7). Guide: §5.9 Beyond CRUD.
+     */
+    public List<LoanResponse> findOverdue() {
+        return loans.findOverdue(LocalDate.now(clock)).stream()
                 .map(LoanMapper::toResponse)
                 .toList();
     }
