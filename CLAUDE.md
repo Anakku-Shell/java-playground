@@ -20,7 +20,7 @@ concept's code updates its guide section.
 - Errors are `ProblemDetail`. The schema changes only through Flyway (`ddl-auto: validate`).
 - Logging with SLF4J (`LoggerFactory.getLogger`), never `System.out` in `spring-app`.
 - No Lombok or MapStruct in main code (only in the labelled legacy examples).
-- Tests: `*Test` = unit/slice with no Docker (Surefire, `./mvnw test`); `*IT` = anything that needs Docker: a full context or a `@DataJpaTest` slice on Testcontainers PostgreSQL, via `@Import(TestcontainersConfiguration.class)` (Failsafe, `./mvnw verify`). AssertJ assertions.
+- Tests: `*Test` = unit/slice with no Docker (Surefire, `./mvnw test`); `*IT` = anything that needs Docker: a full context or a `@DataJpaTest` slice on Testcontainers PostgreSQL, via `@Import(TestcontainersConfiguration.class)` (Failsafe, `./mvnw verify`). AssertJ assertions. Build test data with `testing/TestDataFactory` (entities, `withId`, `aBookRequest()`); full-context tests call `TestTables.truncateAll` first, never `@DirtiesContext`. A test class whose setup differs (another bean override, import, profile or property) adds a Spring context and a container (§5.8).
 - Spring Boot 4 splits starters per technology (`spring-boot-starter-webmvc`, `...-webmvc-test`, `...-flyway`…). Check start.spring.io for the exact artifact before adding one.
 
 ## Commands
@@ -30,6 +30,8 @@ concept's code updates its guide section.
 ./mvnw spotless:apply                  # format the code (run before committing)
 ./mvnw -pl spring-app spring-boot:run -Dspring-boot.run.profiles=dev  # run the API on :8080 with demo data and users
 ./mvnw -pl java-core test -Dtest=RecordsTest   # one test class
+./mvnw -pl spring-app verify -Dit.test=ApiSmokeIT -Dtest=none -Dsurefire.failIfNoSpecifiedTests=false  # one IT
+# verify also writes the JaCoCo coverage report: spring-app/target/site/jacoco/index.html
 ```
 
 - Docker Desktop must be running for `spring-boot:run` (it starts `spring-app/compose.yaml`) and for the `*IT` tests. The dev profile adds the demo data and users (`db/demo`, password `demo-password`), SQL logging and a dev-only JWT secret; without it the app needs `LIBRARY_SECURITY_JWT_SECRET`.

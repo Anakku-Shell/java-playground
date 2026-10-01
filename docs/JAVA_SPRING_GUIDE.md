@@ -70,7 +70,7 @@ From the persistence chapter on, PostgreSQL runs in Docker. Spring Boot starts i
 
 ### Everyday commands
 
-Run them from the repo root. On PowerShell, use `.\mvnw` instead of `./mvnw`.
+Run them from the repo root. On PowerShell, use `.\mvnw` instead of `./mvnw`, and quote every `-D` argument that contains a dot: `'-Dspring-boot.run.profiles=dev'`. Windows PowerShell 5.1 splits an unquoted one at the first dot, so Maven gets two broken arguments.
 
 | Command | What it does |
 |---|---|
@@ -1879,7 +1879,152 @@ Issuing tokens yourself means owning password storage, resets, lockout, MFA and 
 
 ### 5.8 Testing
 
-_Written in Phase 11._
+**What it is.** The toolkit is JUnit (the test runner and lifecycle), AssertJ (fluent assertions), Mockito (test doubles), Spring's test support (contexts, slices, MockMvc, `RestTestClient`), Testcontainers (a real PostgreSQL in Docker) and JaCoCo (coverage). Boot 4 brings JUnit 6. Its programming model, Jupiter (`org.junit.jupiter`: `@Test`, `@Nested`, `@ParameterizedTest`…), is the one JUnit 5 introduced, so most docs and codebases still say "JUnit 5". The `spring-boot-starter-*-test` starters bring JUnit, AssertJ, Mockito and Spring's test support. Testcontainers is three explicit test dependencies (§5.4), and JaCoCo is a Maven plugin. Every chapter so far added tests; this one fills the gaps and explains how the pieces fit.
+
+#### The pyramid in this project
+
+Most tests are cheap and narrow; a few are expensive and wide.
+
+| Kind | Annotation | What it loads | Docker | Examples |
+|---|---|---|---|---|
+| Plain unit | none, or `@ExtendWith(MockitoExtension.class)` | Nothing: `new` the class, mock its collaborators | No | `BookServiceTest`, `LoanServiceTest`, `IsbnTest`, everything in `java-core` |
+| Web slice | `@WebMvcTest(XController.class)` | MVC infrastructure, that controller, `@ControllerAdvice`, Jackson. Services must be `@MockitoBean`s; our security config must be `@Import`ed (§5.7) | No | `BookControllerTest`, `CorsTest` |
+| JSON slice | `@JsonTest` | The application's Jackson setup + `JacksonTester` | No | `LoanResponseJsonTest` |
+| JPA slice | `@DataJpaTest` | JPA, Flyway, the repositories, `TestEntityManager`. Each test runs in a transaction that rolls back | Yes | `BookRepositoryIT`, `BookQueriesIT`, `LoanRepositoryIT` |
+| Full context, mock web | `@SpringBootTest` + `@AutoConfigureMockMvc` | Everything; requests go through `MockMvc`, no socket | Yes | `BookControllerIT`, `LoanSecurityIT` |
+| Full context, real server | `@SpringBootTest(webEnvironment = RANDOM_PORT)` | Everything, plus Tomcat on a free port | Yes | `ApiSmokeIT` |
+
+Think of a slice as a cut-down `@SpringBootTest`. Each slice annotation has its own short list of auto-configurations and a filter on component scanning (`@WebMvcTest` picks up controllers and advice, not services). It loads what one layer needs and nothing else, so it starts in a fraction of the time and a failure points at that layer. Our `@Configuration` classes are not part of a slice: `@Import` the ones a test needs (`JpaAuditingConfig` in the JPA tests, `SecurityConfig` in the web ones).
+
+The naming rule from §1 decides where a test runs:
+- `*Test` = no Docker, run by **Surefire** in the `test` phase (`./mvnw test`).
+- `*IT` = needs Docker, run by **Failsafe** in `integration-test`, and checked in `verify`.
+
+Both plugins run every test of the module before reporting. A failing unit test fails the build in `test`, so the ITs never start. A failing IT is only recorded in `integration-test`; the build fails in `verify`, after `post-integration-test` has run (here, JaCoCo's report).
+
+#### Context caching — why the full tests are fast
+
+Starting a Spring context (plus a PostgreSQL container) takes seconds. The test framework keeps every context it starts in a cache, keyed by the test's **configuration**: the annotation and its attributes, `@Import`ed classes, active profiles, properties, and every `@MockitoBean`/`@MockitoSpyBean`. Two test classes with the same key share one context; anything different gets a new one.
+
+This suite starts **9 contexts** (so 9 containers, one `@Bean` each in `TestcontainersConfiguration`):
+
+| Context | Test classes |
+|---|---|
+| `@SpringBootTest` + `@AutoConfigureMockMvc` | `AuthorControllerIT`, `BookControllerIT`, `LoanControllerIT`, `LoanSecurityIT`, `LoanConcurrencyIT`, `MemberControllerIT`, `AuthControllerIT`, `JwtAuthIT` |
+| `RANDOM_PORT` | `ApiSmokeIT` |
+| plain `@SpringBootTest` | `LibraryApplicationIT` |
+| the dev profile | `DemoDataIT` |
+| `webEnvironment = NONE` + its own beans | `TransactionBehaviourIT` |
+| `@DataJpaTest` + 4 different setups | `BookRepositoryIT`, `BookQueriesIT` (imports `BookService`, has a spy), `LoanRepositoryIT` (statistics on), `AuditingIT` (mocks the `Clock`) |
+
+`@WithMockUser` is not part of the key (it acts per test), so the eight MockMvc classes share one context. Adding one `@MockitoBean` to one of them would split it off and cost a context.
+
+**One container for the whole run?** Make the container a static field, which exists once per JVM, and let `@ImportTestcontainers` hand it to every context:
+
+```java
+@TestConfiguration(proxyBeanMethods = false)
+@ImportTestcontainers                 // reads the static container fields of this class
+public class TestcontainersConfiguration {
+    @ServiceConnection
+    static PostgreSQLContainer postgres = new PostgreSQLContainer("postgres:17");
+}
+```
+
+Tried on three of these contexts, it starts one container instead of three, and each later context starts a second or two sooner. (Testcontainers' Ryuk container removes it when the JVM exits.) This project keeps one container per context instead: with a shared database, `DemoDataIT` would find other tests' rows next to its demo data, and the `@DataJpaTest` classes, which never truncate, would find rows the full tests committed.
+
+**`@DirtiesContext`** removes a context from the cache after a test, and the next test pays for a new one. It is the blunt fix for "a test left something behind". Clean the data instead (`TestTables.truncateAll` in each full test's `@BeforeEach`), and keep `@DirtiesContext` for a test that changes the context itself.
+
+#### Mockito essentials
+
+```java
+@ExtendWith(MockitoExtension.class)
+class BookServiceTest {
+    @Mock BookRepository books;                    // an empty implementation: returns null/0/empty
+    @InjectMocks BookService service;              // built with the mocks as constructor arguments
+    @Captor ArgumentCaptor<Book> savedBook;
+
+    // ...inside test methods:
+    given(books.existsByIsbn("9780441013593")).willReturn(true);                // stub
+    given(books.save(any())).willAnswer(call -> withId(call.getArgument(0), 10L)); // stub with code
+    then(books).should(never()).save(any());                                    // verify
+    then(books).should().save(savedBook.capture());                              // capture...
+    assertThat(savedBook.getValue().getIsbn()).isEqualTo("9780441013593");       // ...and inspect
+}
+```
+
+- `given`/`then` are the BDD spellings of `when`/`verify`. Same thing; they read as "given, when, then".
+- **Strict stubs.** `MockitoExtension` fails a test that stubs something it never uses (`UnnecessaryStubbingException`). It keeps setups honest.
+- **Captor vs return value.** `savesTheEntityItBuiltFromTheRequest` checks what reached the repository, which the response alone cannot prove.
+- **Mock vs spy.** A mock is empty; a spy wraps a real object and calls through. `@MockitoBean`/`@MockitoSpyBean` do the same to a bean in a Spring context. `BookQueriesIT` spies on the real `LoanRepository` to count calls (`times(1)`). It also stubs one method, and checks that the others still read the database. Stub a spy with `willReturn(x).given(spy).method()`: `given(spy.method())` calls the real method first.
+- Verify behaviour that matters (a save that must not happen, a query that must run once), not every call. A test that mirrors the implementation breaks on every refactor.
+
+#### JUnit Jupiter features
+
+| Feature | What it is for | Where |
+|---|---|---|
+| `@Nested` | Group tests per use case; the report shows a tree. Outer fields and `@BeforeEach` apply inside | `BookServiceTest` |
+| `@ParameterizedTest` + `@ValueSource` | One argument per run | `IsbnTest` |
+| `@CsvSource` | Several arguments per row, input next to expected | `IsbnTest.convertsToThirteenBareDigits`, `BookServiceTest.Update` |
+| `@MethodSource` + `argumentSet(name, ...)` | Arguments built by code, each case named | `IsbnValidatorTest` |
+| `@ParameterizedTest(name = "...")` | A readable name per row (`{0}`, `{1}`…) | `BookServiceTest.Update` |
+| `assertThatThrownBy(() -> ...)` (AssertJ) | Expect an exception, then assert its type and message | everywhere |
+
+#### Test data
+
+`testing/TestDataFactory` holds the entities the suite keeps reaching for (`dune()`, `ada()`, `herbert()`…), `withId` (entities have no `setId`, so unit tests set it by reflection), and a **test data builder**: `aBookRequest().totalCopies(1).update()`. Every field has a default, so a test names only the one it is about. Records have no `with` methods, which is why the builder exists.
+
+#### Databases in tests
+
+- **Testcontainers + `@ServiceConnection`** (§5.4): a real PostgreSQL per context, and Boot builds the `DataSource` from the container. No H2: an in-memory database accepts SQL PostgreSQL rejects and the other way round (`BookRepositoryIT.nativeQueryUsesPostgresFullTextSearch`).
+- **`@DataJpaTest` rolls back** each test. Full `@SpringBootTest` tests do not (the request runs in its own transaction and commits), so they truncate first.
+- **`@Sql("/sql/le-guin-books.sql")`** runs a script before one test, inside its transaction, so the rows roll back with it (`BookRepositoryIT.anSqlScriptAddsRowsForOneTest`). Handy for data that is awkward to build through entities. It runs *before* the class's `@BeforeEach` methods (Spring's hook runs first), so a script cannot rely on rows `@BeforeEach` saves.
+
+#### MockMvc or a real server
+
+`MockMvc` calls the `DispatcherServlet` directly: no socket and no Tomcat. The request runs on the test's own thread, which is why `@WithMockUser` works. `RestTestClient` talks HTTP to the server started by `RANDOM_PORT`; the request runs on a Tomcat thread. `RestTestClient` is new in Spring Framework 7 and is the one to use. `TestRestTemplate` still exists (Boot 4: `@AutoConfigureTestRestTemplate`), and older code uses it. Use the real server for the few things only it does: the servlet container, real headers (`ApiSmokeIT.theLocationHeaderPointsAtTheRealServer`: MockMvc's `Location` has no port), and a journey across the whole API.
+
+```java
+@SpringBootTest(webEnvironment = RANDOM_PORT)
+@AutoConfigureRestTestClient
+class ApiSmokeIT {
+    @Autowired RestTestClient client;
+
+    // ...inside a test method:
+    client.post().uri("/api/auth/login").contentType(APPLICATION_JSON).body(new LoginRequest(email, pwd))
+            .exchange()
+            .expectStatus().isOk()
+            .expectBody(TokenResponse.class).returnResult().getResponseBody();
+}
+```
+
+Security in tests (`@WithMockUser`, `jwt()`, real tokens) is in §5.7.
+
+#### Running tests
+
+| What | Command |
+|---|---|
+| Unit tests of one module | `./mvnw -pl spring-app test` |
+| One class | `./mvnw -pl spring-app test -Dtest=BookServiceTest` |
+| One nested class / one method | `-Dtest='BookServiceTest$Update'` / `-Dtest='BookServiceTest$Create#savesTheEntityItBuiltFromTheRequest'` |
+| One IT | `./mvnw -pl spring-app verify -Dit.test=ApiSmokeIT -Dtest=none -Dsurefire.failIfNoSpecifiedTests=false` |
+| Everything | `./mvnw verify` |
+| A fresh coverage report | `./mvnw clean verify` |
+
+`-Dtest=none` plus `failIfNoSpecifiedTests=false` skips the unit tests, which would otherwise all run first. **In PowerShell, quote every `-D` argument that contains a dot** (`'-Dit.test=ApiSmokeIT'`, `'-Dsurefire.failIfNoSpecifiedTests=false'`), as §1 explains. Quote the ones with `$` too: both shells would read `$Update` as a variable. In VS Code, the Testing view (or the ▶ next to a test) runs a class, a nested class or a method; ITs need Docker there too.
+
+**Coverage.** `./mvnw verify` writes `spring-app/target/site/jacoco/index.html`: lines and branches per package, class and method, with the source coloured by what ran. JaCoCo's agent rides on the `argLine` that Surefire and Failsafe already pass to their JVMs, and the report runs in `post-integration-test`, so it counts both kinds of test. The agent *appends* to `target/jacoco.exec`, so the report also counts every earlier build since the last `clean`. Run `./mvnw clean verify` when the numbers matter. No threshold is enforced: read the report for untested branches, not for the percentage.
+
+**Time.** A full `./mvnw verify` takes about 55 seconds on the machine this guide was written on (Docker already running, images pulled): `java-core` about 2 s, the `spring-app` unit tests about 10 s, and most of the rest goes on starting the 9 contexts and their containers. At the end of this chapter the report shows about 97 % of lines and 80 % of branches covered.
+
+**Where it is in the code:** `spring-app/src/test/java/dev/playground/library/` (`testing/TestDataFactory`, `TestTables`, `TestUsers`, `TestcontainersConfiguration`, `ApiSmokeIT`), `spring-app/src/test/resources/sql/`, the JaCoCo plugin in `spring-app/pom.xml`.
+
+**Gotchas**
+- **A new bean override is a new context.** One `@MockitoBean` in one class splits it from the shared context, and adds a container. Group such tests, or check the context count when the suite gets slower.
+- **`@Transactional` on a MockMvc test hides bugs.** The test's transaction wraps the request, so lazy loading that would fail after the service returns works in the test, and nothing commits. This suite truncates instead. (With a real server the request runs on a Tomcat thread, outside the test's transaction, so the annotation does not even roll back.)
+- **`@WithMockUser` is per thread.** Requests sent from other threads need per-request authentication: `.with(jwt())` in MockMvc (`LoanConcurrencyIT`, through `TestUsers`), a real bearer token for a real server (`ApiSmokeIT`) (§5.7).
+- **Unused stubs fail.** That is `MockitoExtension` being strict, not a bug in the code under test. Remove the stub, or use `lenient()` when a shared setup really needs it.
+- **The same name, two classes.** Failsafe picks `*IT` and Surefire `*Test`. Name an IT `BookRepositoryTest` and it runs in `./mvnw test`, where Docker may not be running.
+- **Coverage is not correctness.** A test that calls a method and asserts nothing covers every line of it.
 
 ### 5.9 Beyond CRUD
 
@@ -1971,6 +2116,7 @@ A map for orientation, not a claim that the pieces are identical. It grows with 
 | `IHostedService`, `IHostApplicationLifetime.ApplicationStarted` | `ApplicationRunner`, `@EventListener(ApplicationReadyEvent.class)` | A hosted service starts before the server listens; an `ApplicationRunner` runs after Tomcat has started |
 | `IDisposable` on a service | `@PreDestroy` | |
 | `WebApplicationFactory<T>` | `@SpringBootTest` (whole app) or slices such as `@WebMvcTest` | Slices have no direct .NET equivalent |
+| `factory.CreateClient()` (in-memory `TestServer`) | `MockMvc` / `MockMvcTester` | No socket in either. For a real port: `RANDOM_PORT` + `RestTestClient` (§5.8) |
 | `[ApiController]` + `ControllerBase` | `@RestController` | |
 | `[Route("api/books")]`, `[HttpGet("{id}")]` | `@RequestMapping("/api/books")`, `@GetMapping("/{id}")` | |
 | `[FromRoute]` / `[FromQuery]` / `[FromBody]` | `@PathVariable` / `@RequestParam` / `@RequestBody` | Spring does not infer the body: `@RequestBody` is required |
@@ -1981,6 +2127,13 @@ A map for orientation, not a claim that the pieces are identical. It grows with 
 | `System.Text.Json` | Jackson (3 in Boot 4) | Both ignore unknown JSON properties by default |
 | Swashbuckle / `Microsoft.AspNetCore.OpenApi` | springdoc-openapi | `/v3/api-docs` + `/swagger-ui.html` |
 | Moq `Setup(...).Returns(...)` / `Verify(...)` | Mockito `given(...).willReturn(...)` / `verify(...)` | `@MockitoBean` puts the mock in the Spring context |
+| Moq `It.IsAny<T>()`, `Callback(...)` to capture | `any()`, `ArgumentCaptor` | |
+| xUnit / NUnit | JUnit (6 in Boot 4; the Jupiter API of JUnit 5) + AssertJ | Like xUnit, JUnit creates a new test class instance per test |
+| `[Fact]` / `[Theory]` + `[InlineData]` / `[MemberData]` | `@Test` / `@ParameterizedTest` + `@CsvSource` / `@MethodSource` | §5.8 |
+| Nested classes for grouping | `@Nested` | |
+| `IClassFixture<T>`, collection fixtures | Spring's test context cache | Shared automatically by tests with the same configuration (§5.8) |
+| Testcontainers for .NET | Testcontainers + `@ServiceConnection` | Same project family |
+| coverlet (`--collect:"XPlat Code Coverage"`) | JaCoCo (`target/site/jacoco`) | |
 | `.http` files in Visual Studio / Rider | `.http` files with VS Code REST Client or IntelliJ | Nearly the same syntax |
 | DataAnnotations: `[Required]`, `[StringLength]`, `[Range]`, `[RegularExpression]` | Bean Validation: `@NotBlank`/`@NotNull`, `@Size`, `@Min`/`@Max`, `@Pattern` | Same idea: attributes on the model, checked by a framework |
 | A custom `ValidationAttribute` / `IValidatableObject` | A custom constraint + `ConstraintValidator` / a class-level constraint | |
@@ -2081,5 +2234,6 @@ A map for orientation, not a claim that the pieces are identical. It grows with 
 - **`hasRole('ADMIN')` checks for `ROLE_ADMIN`.** A token or `UserDetails` whose authority is plain `ADMIN` never matches it. Use `hasAuthority` for the exact string (§5.7).
 - **Security is not the MVC pipeline.** The filters run before Spring MVC, so `@RestControllerAdvice` never sees a 401 or 403 from them unless you route it there, as `SecurityProblemHandler` does (§5.7).
 - **A record's `toString` prints every field.** A request record with a password ends up in a log with it. Override `toString` (§5.7).
+- **`./mvnw test` skips the integration tests.** `dotnet test` runs every test project. Maven splits them: Surefire runs `*Test` in `test`, Failsafe runs `*IT` in `verify` (§5.8).
 - **Pages start at 0.** `?page=1` is the second page.
 - **The schema is not generated from the classes.** Flyway runs your SQL; Hibernate only validates. Adding a field to an entity means writing a migration too, or the app does not start.

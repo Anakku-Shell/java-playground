@@ -24,11 +24,13 @@ Maven does **not** need to be installed: the Maven Wrapper (`mvnw`) downloads th
 ./mvnw -pl spring-app spring-boot:run -Dspring-boot.run.profiles=dev   # start the API on http://localhost:8080 with demo data
 ```
 
+In Windows PowerShell, use `.\mvnw` and quote `-D` arguments that contain a dot: `.\mvnw -pl spring-app spring-boot:run '-Dspring-boot.run.profiles=dev'`.
+
 The API needs a JWT signing secret. The dev profile brings a dev-only one; without that profile, set `LIBRARY_SECURITY_JWT_SECRET` (32+ characters) or the app refuses to start.
 
 **Demo users** (dev profile only, password `demo-password` for all): `librarian@library.test` (LIBRARIAN), and `ada@library.test`, `alan@library.test`, `grace@library.test` (MEMBER). Log in with `POST /api/auth/login` and send the returned token as `Authorization: Bearer <token>`; `spring-app/http/10-security.http` shows how. These credentials exist only for local learning.
 
-With Docker Desktop running, `spring-boot:run` starts PostgreSQL by itself (`spring-app/compose.yaml`), and `verify` runs the integration tests on throwaway containers. `docker compose -f spring-app/compose.yaml down -v` deletes the local data.
+With Docker Desktop running, `spring-boot:run` starts PostgreSQL by itself (`spring-app/compose.yaml`), and `verify` runs the integration tests on throwaway containers. `docker compose -f spring-app/compose.yaml down -v` deletes the local data. `verify` also writes a coverage report to `spring-app/target/site/jacoco/index.html`.
 
 On PowerShell, use `.\mvnw` instead of `./mvnw`.
 

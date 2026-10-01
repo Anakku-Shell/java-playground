@@ -1,7 +1,17 @@
 package dev.playground.library.book;
 
+import static dev.playground.library.testing.TestDataFactory.ada;
+import static dev.playground.library.testing.TestDataFactory.herbert;
+import static dev.playground.library.testing.TestDataFactory.leGuin;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.tuple;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyCollection;
+import static org.mockito.BDDMockito.then;
+import static org.mockito.BDDMockito.willReturn;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 
 import dev.playground.library.TestcontainersConfiguration;
 import dev.playground.library.author.Author;
@@ -9,6 +19,11 @@ import dev.playground.library.author.AuthorRepository;
 import dev.playground.library.book.dto.BookResponse;
 import dev.playground.library.common.PageResponse;
 import dev.playground.library.config.JpaAuditingConfig;
+import dev.playground.library.loan.Loan;
+import dev.playground.library.loan.LoanRepository;
+import dev.playground.library.member.Member;
+import java.time.Instant;
+import java.time.LocalDate;
 import java.util.List;
 import java.util.Set;
 import org.hibernate.LazyInitializationException;
@@ -24,12 +39,13 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
 import org.springframework.data.jpa.domain.Specification;
+import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 
 /**
  * The book–author relation against PostgreSQL: which side writes the join table, lazy loading, and
  * how many SQL statements each way of loading costs. Hibernate's {@code Statistics} (switched on
  * for this test only) counts the statements sent. Every test starts from an empty persistence
- * context ({@code clear()}), as a new request would. Guide: §5.5 Advanced JPA.
+ * context ({@code clear()}), as a new request would. Guide: §5.5 Advanced JPA, §5.8 Testing (the spy).
  */
 @DataJpaTest(properties = "spring.jpa.properties.hibernate.generate_statistics=true")
 // BookService is not part of the JPA slice; importing it adds just that bean.
@@ -48,6 +64,13 @@ class BookQueriesIT {
     @Autowired
     private TestEntityManager em;
 
+    // A spy wraps the real repository bean: every call goes through to PostgreSQL as usual, and
+    // Mockito records it, so the test can verify the calls or stub just one method. (A @MockitoBean
+    // would replace the bean with an empty mock.) It changes the context's cache key like any
+    // bean override; this class already has a context of its own, so it costs no extra one.
+    @MockitoSpyBean
+    private LoanRepository loans;
+
     private Statistics statistics;
 
     private Author herbert;
@@ -56,8 +79,8 @@ class BookQueriesIT {
 
     @BeforeEach
     void saveBooksWithAuthors() {
-        herbert = authors.save(new Author("Frank Herbert", 1920));
-        leGuin = authors.save(new Author("Ursula K. Le Guin", 1929));
+        herbert = authors.save(herbert());
+        leGuin = authors.save(leGuin());
         dune = saveBook("9780441013593", "Dune", herbert);
         saveBook("9780593098233", "Dune Messiah", herbert);
         saveBook("9780061054884", "The Dispossessed", leGuin);
@@ -150,6 +173,39 @@ class BookQueriesIT {
         // first page shorter than the page size is the whole result, so Spring Data skips it. The
         // same 3 for a page of 100.
         assertThat(statements()).isEqualTo(3);
+    }
+
+    @Test
+    void aPageAsksForTheLoansOfAllItsBooksAtOnce() {
+        service.findAll(null, null, PageRequest.of(0, 20, Sort.by("title")));
+
+        // The same N+1 guard as the statement count above, said in terms of the code: one grouped
+        // count for the page, never the one-book count findById uses.
+        then(loans).should(times(1)).countActiveByBookIds(anyCollection());
+        then(loans).should(never()).countByBookIdAndReturnedAtIsNull(any());
+    }
+
+    @Test
+    void aSpyCanStubOneMethodAndKeepTheRest() {
+        // A real loan of Dune's only copy.
+        Member ada = em.persist(ada());
+        em.persist(new Loan(
+                em.find(Book.class, dune.getId()),
+                ada,
+                Instant.parse("2026-09-30T10:00:00Z"),
+                LocalDate.of(2026, 10, 14)));
+        em.flush();
+        // Stub one method of the spy: the grouped count now says nothing is out. Stub a spy with
+        // willReturn(..).given(spy): given(spy.method(..)) would first call the real method.
+        willReturn(List.of()).given(loans).countActiveByBookIds(anyCollection());
+
+        PageResponse<BookResponse> page = service.findAll("dune", null, PageRequest.of(0, 20, Sort.by("title")));
+
+        assertThat(page.content())
+                .extracting(BookResponse::title, BookResponse::availableCopies)
+                .containsExactly(tuple("Dune", 1), tuple("Dune Messiah", 1));
+        // Every other method is still the real one, and sees the loan. (A mock would answer 0.)
+        assertThat(loans.countByBookIdAndReturnedAtIsNull(dune.getId())).isEqualTo(1);
     }
 
     @Test

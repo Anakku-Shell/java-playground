@@ -1,5 +1,6 @@
 package dev.playground.library.common;
 
+import static dev.playground.library.testing.TestDataFactory.herbert;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.BDDMockito.given;
 
@@ -64,7 +65,7 @@ class AuditingIT {
     @Test
     void changingOnlyTheAuthorsOfABookIsAnUpdateOfTheBook() {
         given(clock.instant()).willReturn(CREATED);
-        Author herbert = em.persist(new Author("Frank Herbert", 1920));
+        Author herbert = em.persist(herbert());
         Book dune = em.persistAndFlush(new Book("9780441013593", "Dune", 1965, 1));
 
         given(clock.instant()).willReturn(EDITED);

@@ -42,6 +42,8 @@
         <palantir-java-format.version>2.100.0</palantir-java-format.version>
         <!-- springdoc is not in the Boot BOM: 3.x is the line for Spring Boot 4. -->
         <springdoc.version>3.1.1</springdoc.version>
+        <!-- JaCoCo (test coverage, spring-app) is not in the Boot BOM either. 0.8.14+ reads Java 25 classes. -->
+        <jacoco.version>0.8.15</jacoco.version>
     </properties>
 
     <build>

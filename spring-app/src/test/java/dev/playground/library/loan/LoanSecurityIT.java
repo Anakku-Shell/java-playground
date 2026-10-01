@@ -1,5 +1,9 @@
 package dev.playground.library.loan;
 
+import static dev.playground.library.testing.TestDataFactory.ada;
+import static dev.playground.library.testing.TestDataFactory.alan;
+import static dev.playground.library.testing.TestDataFactory.dune;
+import static dev.playground.library.testing.TestDataFactory.librarian;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.jayway.jsonpath.JsonPath;
@@ -9,7 +13,6 @@ import dev.playground.library.book.Book;
 import dev.playground.library.book.BookRepository;
 import dev.playground.library.member.Member;
 import dev.playground.library.member.MemberRepository;
-import dev.playground.library.member.Role;
 import dev.playground.library.security.MemberUserDetails;
 import dev.playground.library.security.TokenService;
 import org.junit.jupiter.api.BeforeEach;
@@ -58,11 +61,11 @@ class LoanSecurityIT {
     @BeforeEach
     void aBookTwoMembersAndALibrarian() {
         TestTables.truncateAll(jdbc);
-        dune = books.save(new Book("9780441013593", "Dune", 1965, 3));
+        dune = books.save(dune());
         // No password needed: the tokens come straight from TokenService, not from a login.
-        ada = members.save(new Member("ada@library.test", "Ada Lovelace", null, Role.MEMBER));
-        alan = members.save(new Member("alan@library.test", "Alan Turing", null, Role.MEMBER));
-        librarian = members.save(new Member("librarian@library.test", "Libby Rarian", null, Role.LIBRARIAN));
+        ada = members.save(ada());
+        alan = members.save(alan());
+        librarian = members.save(librarian());
     }
 
     private String bearer(Member member) {

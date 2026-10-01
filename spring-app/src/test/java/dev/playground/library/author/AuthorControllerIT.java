@@ -1,5 +1,6 @@
 package dev.playground.library.author;
 
+import static dev.playground.library.testing.TestDataFactory.herbert;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.jayway.jsonpath.JsonPath;
@@ -88,7 +89,7 @@ class AuthorControllerIT {
 
     @Test
     void deletingAuthorWithBooksReturns409() {
-        Author herbert = repository.save(new Author("Frank Herbert", 1920));
+        Author herbert = repository.save(herbert());
         bookBy(herbert, "9780441013593", "Dune");
 
         assertThat(mvc.delete().uri("/api/authors/{id}", herbert.getId()))
@@ -101,7 +102,7 @@ class AuthorControllerIT {
 
     @Test
     void theBooksOfAnAuthorByTitle() {
-        Author herbert = repository.save(new Author("Frank Herbert", 1920));
+        Author herbert = repository.save(herbert());
         Book messiah = bookBy(herbert, "9780593098233", "Dune Messiah");
         Book dune = bookBy(herbert, "9780441013593", "Dune");
 

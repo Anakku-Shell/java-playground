@@ -1,12 +1,15 @@
 package dev.playground.library.loan;
 
+import static dev.playground.library.testing.TestDataFactory.ada;
+import static dev.playground.library.testing.TestDataFactory.alan;
+import static dev.playground.library.testing.TestDataFactory.dune;
+import static dev.playground.library.testing.TestDataFactory.emma;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import dev.playground.library.TestcontainersConfiguration;
 import dev.playground.library.book.Book;
 import dev.playground.library.config.JpaAuditingConfig;
 import dev.playground.library.member.Member;
-import dev.playground.library.member.Role;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.util.List;
@@ -48,11 +51,11 @@ class LoanRepositoryIT {
 
     @BeforeEach
     void saveLoans() {
-        dune = em.persist(new Book("9780441013593", "Dune", 1965, 3));
-        emma = em.persist(new Book("9780141439587", "Emma", 1815, 2));
+        dune = em.persist(dune());
+        emma = em.persist(emma());
         cosmos = em.persist(new Book("9780345539434", "Cosmos", 1980, 2));
-        ada = em.persist(new Member("ada@library.test", "Ada Lovelace", null, Role.MEMBER));
-        alan = em.persist(new Member("alan@library.test", "Alan Turing", null, Role.MEMBER));
+        ada = em.persist(ada());
+        alan = em.persist(alan());
 
         em.persist(new Loan(dune, ada, T, DUE));
         em.persist(new Loan(dune, alan, T, DUE));

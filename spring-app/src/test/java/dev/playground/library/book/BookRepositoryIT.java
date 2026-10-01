@@ -1,5 +1,8 @@
 package dev.playground.library.book;
 
+import static dev.playground.library.testing.TestDataFactory.dune;
+import static dev.playground.library.testing.TestDataFactory.duneMessiah;
+import static dev.playground.library.testing.TestDataFactory.emma;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -13,13 +16,14 @@ import org.springframework.boot.jpa.test.autoconfigure.TestEntityManager;
 import org.springframework.context.annotation.Import;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Sort;
+import org.springframework.test.context.jdbc.Sql;
 
 /**
  * The repository against a real PostgreSQL. {@code @DataJpaTest} is a slice: JPA, Flyway and the
  * repositories, no web layer and no services. Each test runs in a transaction that is rolled back
  * at the end, so the tests do not see each other's rows. Our {@code @Configuration} classes are not
  * part of the slice: without the auditing one, {@code created_at} would be inserted as null (§5.5).
- * Guide: §5.4 Persistence with JPA.
+ * Guide: §5.4 Persistence with JPA, §5.8 Testing ({@code @Sql}).
  */
 @DataJpaTest
 @Import({TestcontainersConfiguration.class, JpaAuditingConfig.class})
@@ -37,9 +41,9 @@ class BookRepositoryIT {
 
     @BeforeEach
     void saveSomeBooks() {
-        dune = repository.save(new Book("9780441013593", "Dune", 1965, 3));
-        messiah = repository.save(new Book("9780593098233", "Dune Messiah", 1969, 2));
-        repository.save(new Book("9780141439587", "Emma", 1815, 2));
+        dune = repository.save(dune());
+        messiah = repository.save(duneMessiah());
+        repository.save(emma());
     }
 
     @Test
@@ -74,6 +78,26 @@ class BookRepositoryIT {
                 .isFalse();
         assertThat(repository.existsByIsbnAndIdNot("9780441013593", messiah.getId()))
                 .isTrue();
+    }
+
+    @Test
+    @Sql("/sql/le-guin-books.sql")
+    void anSqlScriptAddsRowsForOneTest() {
+        // 3 books from @BeforeEach plus the 2 of the script. The next test starts without them: the
+        // script ran in this test's transaction, and the rollback took them away.
+        assertThat(repository.count()).isEqualTo(5);
+        assertThat(repository.searchTitles("darkness"))
+                .extracting(Book::getTitle)
+                .containsExactly("The Left Hand of Darkness");
+        assertThat(repository.findByAuthorsIdOrderByTitle(leGuinId()))
+                .extracting(BookTitleOnly::getTitle)
+                .containsExactly("The Dispossessed", "The Left Hand of Darkness");
+    }
+
+    private Long leGuinId() {
+        return em.getEntityManager()
+                .createQuery("select a.id from Author a where a.name = 'Ursula K. Le Guin'", Long.class)
+                .getSingleResult();
     }
 
     @Test

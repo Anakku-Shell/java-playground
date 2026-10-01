@@ -19,7 +19,7 @@
     <description>Library REST API built with Spring Boot</description>
 
     <properties>
-        <!-- Empty default so @{argLine} below resolves; JaCoCo (Phase 11) prepends its agent here. -->
+        <!-- Empty default so @{argLine} below resolves; JaCoCo's prepare-agent fills it with its agent. -->
         <argLine/>
     </properties>
 
@@ -176,6 +176,32 @@
                 <configuration>
                     <argLine>@{argLine} -javaagent:${org.mockito:mockito-core:jar}</argLine>
                 </configuration>
+            </plugin>
+            <!--
+              JaCoCo measures which lines and branches the tests run. prepare-agent (start of the build)
+              puts its Java agent into ${argLine}, which Surefire and Failsafe above already pass to their
+              JVMs; both append to target/jacoco.exec. report runs after the ITs, so one report covers
+              both kinds of test: target/site/jacoco/index.html. No threshold: a number to hit invites
+              tests written for the number. Guide: §5.8 Testing.
+            -->
+            <plugin>
+                <groupId>org.jacoco</groupId>
+                <artifactId>jacoco-maven-plugin</artifactId>
+                <version>${jacoco.version}</version>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>prepare-agent</goal>
+                        </goals>
+                    </execution>
+                    <execution>
+                        <id>report</id>
+                        <phase>post-integration-test</phase>
+                        <goals>
+                            <goal>report</goal>
+                        </goals>
+                    </execution>
+                </executions>
             </plugin>
             <!-- Adds `spring-boot:run` and repackages the jar into an executable "fat jar". -->
             <plugin>

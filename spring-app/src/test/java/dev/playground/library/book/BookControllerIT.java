@@ -1,5 +1,7 @@
 package dev.playground.library.book;
 
+import static dev.playground.library.testing.TestDataFactory.herbert;
+import static dev.playground.library.testing.TestDataFactory.leGuin;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import com.jayway.jsonpath.JsonPath;
@@ -97,8 +99,8 @@ class BookControllerIT {
 
     @Test
     void authorsAreLinkedFilteredAndReplaced() throws Exception {
-        Author herbert = authors.save(new Author("Frank Herbert", 1920));
-        Author leGuin = authors.save(new Author("Ursula K. Le Guin", 1929));
+        Author herbert = authors.save(herbert());
+        Author leGuin = authors.save(leGuin());
         long dune = idOf(create("9780441013593", "Dune", leGuin.getId(), herbert.getId()));
         create("9780061054884", "The Dispossessed", leGuin.getId());
 
@@ -200,7 +202,7 @@ class BookControllerIT {
     void sortingThroughARelationIs400() throws Exception {
         // authors.name exists, but sorting by it joins book_authors: a book with two authors
         // becomes two rows, and LIMIT/OFFSET would count rows, not books (duplicates, wrong totals).
-        Author herbert = authors.save(new Author("Frank Herbert", 1920));
+        Author herbert = authors.save(herbert());
         create("9780441013593", "Dune", herbert.getId());
 
         assertThat(mvc.get().uri("/api/books").queryParam("sort", "authors.name"))

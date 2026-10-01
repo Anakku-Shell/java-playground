@@ -1,5 +1,7 @@
 package dev.playground.library.loan;
 
+import static dev.playground.library.testing.TestDataFactory.ada;
+import static dev.playground.library.testing.TestDataFactory.alan;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
@@ -12,7 +14,6 @@ import dev.playground.library.book.Book;
 import dev.playground.library.book.BookRepository;
 import dev.playground.library.member.Member;
 import dev.playground.library.member.MemberRepository;
-import dev.playground.library.member.Role;
 import java.sql.Connection;
 import java.sql.Statement;
 import java.sql.Timestamp;
@@ -73,8 +74,8 @@ class LoanConcurrencyIT {
     void aBookWithOneCopyAndTwoMembers() {
         TestTables.truncateAll(jdbc);
         lastCopy = books.save(new Book("9780061054884", "The Dispossessed", 1974, 1));
-        ada = members.save(new Member("ada@library.test", "Ada Lovelace", null, Role.MEMBER));
-        alan = members.save(new Member("alan@library.test", "Alan Turing", null, Role.MEMBER));
+        ada = members.save(ada());
+        alan = members.save(alan());
     }
 
     @AfterEach

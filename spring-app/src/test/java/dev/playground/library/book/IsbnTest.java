@@ -5,9 +5,10 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
-/** ISBN checksums and the ISBN-10 → ISBN-13 conversion. Guide: §5.3 Validation & errors. */
+/** ISBN checksums and the ISBN-10 → ISBN-13 conversion. Guide: §5.3 Validation & errors, §5.8 Testing. */
 class IsbnTest {
 
     @ParameterizedTest
@@ -34,16 +35,20 @@ class IsbnTest {
         assertThat(Isbn.isValid(isbn)).isFalse();
     }
 
-    @Test
-    void convertsIsbn10ToIsbn13() {
-        // Prefix 978, keep the 9 body digits, recompute the check digit with ISBN-13's 1-3 weights.
-        assertThat(Isbn.toIsbn13("0441013597")).isEqualTo("9780441013593");
-        assertThat(Isbn.toIsbn13("0-8044-2957-X")).isEqualTo("9780804429573");
-    }
-
-    @Test
-    void stripsSeparatorsFromIsbn13() {
-        assertThat(Isbn.toIsbn13("978-0-441-01359-3")).isEqualTo("9780441013593");
+    // @CsvSource: one row per case, input and expected value side by side. ISBN-10s get the 978
+    // prefix and a check digit recomputed with ISBN-13's 1-3 weights; separators go. A value with a
+    // comma or leading spaces would need quotes ('a, b'): the row is split on commas and trimmed.
+    @ParameterizedTest(name = "{0} -> {1}")
+    @CsvSource({
+        "0441013597,        9780441013593",
+        "0-8044-2957-X,     9780804429573",
+        "0-8044-2957-x,     9780804429573",
+        "978-0-441-01359-3, 9780441013593",
+        "978 0 441 01359 3, 9780441013593",
+        "9780441013593,     9780441013593"
+    })
+    void convertsToThirteenBareDigits(String isbn, String isbn13) {
+        assertThat(Isbn.toIsbn13(isbn)).isEqualTo(isbn13);
     }
 
     @Test

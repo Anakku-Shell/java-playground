@@ -1,5 +1,8 @@
 package dev.playground.library.loan;
 
+import static dev.playground.library.testing.TestDataFactory.ada;
+import static dev.playground.library.testing.TestDataFactory.dune;
+import static dev.playground.library.testing.TestDataFactory.withId;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
@@ -16,7 +19,6 @@ import dev.playground.library.config.LibraryProperties;
 import dev.playground.library.loan.dto.LoanResponse;
 import dev.playground.library.member.Member;
 import dev.playground.library.member.MemberRepository;
-import dev.playground.library.member.Role;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.LocalDate;
@@ -27,7 +29,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
-import org.springframework.test.util.ReflectionTestUtils;
 
 /**
  * The loan rules, with the repositories mocked and a fixed {@code Clock}: "now" is always
@@ -61,13 +62,9 @@ class LoanServiceTest {
         var properties = new LibraryProperties("Test library", new LibraryProperties.Loans(3, 14));
         service = new LoanService(loans, books, members, properties, Clock.fixed(NOW, ZoneOffset.UTC), audit);
 
-        dune = withId(new Book("9780441013593", "Dune", 1965, 2), 1L);
-        ada = withId(new Member("ada@library.test", "Ada Lovelace", null, Role.MEMBER), 7L);
-    }
-
-    private static <T> T withId(T entity, Long id) {
-        ReflectionTestUtils.setField(entity, "id", id);
-        return entity;
+        dune = withId(dune(), 1L);
+        dune.setTotalCopies(2);
+        ada = withId(ada(), 7L);
     }
 
     private void bookAndMemberExist() {
