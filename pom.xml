@@ -44,6 +44,8 @@
         <springdoc.version>3.1.1</springdoc.version>
         <!-- JaCoCo (test coverage, spring-app) is not in the Boot BOM either. 0.8.14+ reads Java 25 classes. -->
         <jacoco.version>0.8.15</jacoco.version>
+        <!-- MapStruct (legacy examples, §6) is not in the Boot BOM; Lombok is. 1.7 is still a beta. -->
+        <mapstruct.version>1.6.3</mapstruct.version>
     </properties>
 
     <build>

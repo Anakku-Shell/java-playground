@@ -19,7 +19,7 @@ concept's code updates its guide section.
 - Constructor injection only; DTOs are records; entities never leave the service layer.
 - Errors are `ProblemDetail`. The schema changes only through Flyway (`ddl-auto: validate`).
 - Logging with SLF4J (`LoggerFactory.getLogger`), never `System.out` in `spring-app`.
-- No Lombok or MapStruct in main code (only in the labelled legacy examples).
+- No Lombok or MapStruct in main code. They are test-scope dependencies, used only by the labelled legacy examples (`legacy/` test packages in both modules, §6); their annotation processors are configured for `default-testCompile` only.
 - Tests: `*Test` = unit/slice with no Docker (Surefire, `./mvnw test`); `*IT` = anything that needs Docker: a full context or a `@DataJpaTest` slice on Testcontainers PostgreSQL, via `@Import(TestcontainersConfiguration.class)` (Failsafe, `./mvnw verify`). AssertJ assertions. Build test data with `testing/TestDataFactory` (entities, `withId`, `aBookRequest()`); full-context tests call `TestTables.truncateAll` first, never `@DirtiesContext`. A test class whose setup differs (another bean override, import, profile or property) adds a Spring context and a container (§5.8).
 - Spring Boot 4 splits starters per technology (`spring-boot-starter-webmvc`, `...-webmvc-test`, `...-flyway`…). Check start.spring.io for the exact artifact before adding one.
 
@@ -29,6 +29,7 @@ concept's code updates its guide section.
 ./mvnw verify                          # compile + unit tests + ITs + Spotless check
 ./mvnw spotless:apply                  # format the code (run before committing)
 ./mvnw -pl spring-app spring-boot:run -Dspring-boot.run.profiles=dev  # run the API on :8080 with demo data and users
+./mvnw -pl spring-app package -DskipTests      # the executable jar; java -jar needs the database started by hand (§6)
 ./mvnw -pl java-core test -Dtest=RecordsTest   # one test class
 ./mvnw -pl spring-app verify -Dit.test=ApiSmokeIT -Dtest=none -Dsurefire.failIfNoSpecifiedTests=false  # one IT
 # verify also writes the JaCoCo coverage report: spring-app/target/site/jacoco/index.html

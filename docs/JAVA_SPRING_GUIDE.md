@@ -80,7 +80,7 @@ Run them from the repo root. On PowerShell, use `.\mvnw` instead of `./mvnw`, an
 | `./mvnw -pl spring-app spring-boot:run -Dspring-boot.run.profiles=dev` | Run the API on http://localhost:8080 with the demo data and users (`Ctrl+C` stops it). Without the dev profile it needs a JWT secret, `LIBRARY_SECURITY_JWT_SECRET` (§5.7) |
 | `./mvnw -pl java-core test -Dtest=SanityTest` | Run one test class (`-Dtest=Class#method` for one method) |
 | `./mvnw clean` | Delete the `target/` folders |
-| `./mvnw -pl spring-app package` | Build the executable jar in `spring-app/target/` |
+| `./mvnw -pl spring-app package -DskipTests` | Build the executable jar in `spring-app/target/`; `java -jar` runs it (§6) |
 | `./mvnw dependency:tree -pl spring-app` | Show every dependency and where it comes from |
 
 `-pl` (*projects list*) selects a module; `-q` makes the output quiet; `-o` works offline.
@@ -243,6 +243,8 @@ Spring Boot inverts this: **your app owns `main()` and starts an embedded Tomcat
 - registration and login, `/api/auth/*` (§5.7). Every other endpoint except `/api/info` and the API docs needs a JWT bearer token, and roles and ownership decide what it may do;
 - book import from Open Library, `/api/books/import/{isbn}`, overdue loans with a daily job, a notification after each borrow, and Actuator under `/actuator` (§5.9);
 - Swagger UI at `/swagger-ui.html`.
+
+The legacy chapter (§6) adds no endpoint: its examples are tests (`legacy` packages in both modules).
 
 Request bodies are validated, and every error is an RFC 9457 `ProblemDetail` (§5.3). On `spring-boot:run`, Spring Boot starts PostgreSQL in Docker and Flyway creates the schema before Tomcat opens the port. `LibraryApplicationIT` (`@SpringBootTest` on a throwaway PostgreSQL) boots the same context in a test, so a broken configuration fails the build.
 
@@ -2238,7 +2240,336 @@ _Written in Phase 14 (optional)._
 
 ## 6. Legacy
 
-_Written in Phase 13._
+**What it is.** Most Java jobs start in an existing code base, often several Java and Spring versions behind this playground. This chapter is a reading guide for that code: what changed between versions, the libraries that hide boilerplate (Lombok, MapStruct), and the older ways to configure, package and run an application. None of it is used by the application itself.
+
+**In this project.** Runnable contrasts, each next to the modern version and asserted equal:
+- `java-core/.../legacy/Java8StyleTest`: the same logic in Java 8 style and in Java 25.
+- `spring-app/src/test/.../legacy/LombokContrastTest`: Lombok classes against records.
+- `spring-app/src/test/.../legacy/MapStructContrastTest`: a MapStruct mapper against the hand-written `BookMapper`.
+
+Lombok and MapStruct are **test-scope** dependencies: the main code cannot use them, and they are not in the jar.
+
+#### Java 8 → 25: what you will see
+
+Java ships a release every six months; companies run the **LTS** ones (long-term support). Read the version from the POM (`<java.version>`, `<maven.compiler.source>`/`<release>`) and expect only the features up to it.
+
+| LTS | Year | What appears (cumulative from the previous LTS) | Covered in |
+|---|---|---|---|
+| **8** | 2014 | Lambdas and method references, streams, `Optional`, `java.time`, default methods in interfaces, `CompletableFuture` | §4.2, §4.3 |
+| **11** | 2018 | `var` (10), `List.of`/`Map.of` (9), `HttpClient` (`java.net.http`), `String.isBlank`/`strip`/`lines`/`repeat`, `Files.readString`, modules (9). **JAXB and the other Java EE modules removed** from the JDK: an old app that used `javax.xml.bind` needs them as dependencies | §4.1 |
+| **17** | 2021 | Switch expressions (14), text blocks (15), records and `instanceof` patterns (16), `Stream.toList()` (16), sealed types, helpful `NullPointerException` messages. The JDK's internals are closed to reflection: old libraries that poked at them fail with `InaccessibleObjectException` | §4.1 |
+| **21** | 2023 | Virtual threads, pattern matching in `switch`, record patterns, sequenced collections (`getFirst()`, `reversed()`) | §4.1, §4.2, §4.3 |
+| **25** | 2025 | Unnamed variables `_` (22), stream gatherers (24), compact source files with an instance `main` (`void main() { … }`), module import declarations, statements before `super(…)` in constructors, scoped values. Annotation processors no longer run unless configured (23, see MapStruct below) | §4.1 |
+
+How to read old code: the same logic shrinks with every LTS. `Java8StyleTest` shows the usual pairs:
+
+| Java 8 code base | Java 25 |
+|---|---|
+| A value class with hand-written getters, `equals`, `hashCode`, `toString` (`LegacyOrder`, 45 lines) | A record (`Order`, one line) |
+| `Collections.sort(list, new Comparator<…>() { … })` | `Comparator.comparingInt(...).reversed().thenComparing(...)` |
+| A loop with `map.get`, a null check and `map.put` | `groupingBy(..., summingInt(...))` |
+| `if (x instanceof Circle) { Circle c = (Circle) x; … } else if …` and a final `throw` | A `switch` over a sealed type, checked by the compiler |
+| `collect(Collectors.toList())` | `toList()`, which is **unmodifiable**: code that adds to the result breaks at runtime when you modernise it |
+| `"{\n" + "  \"a\": 1\n" + "}"` | A text block |
+| `new Thread(new Runnable() { public void run() { … } })` | `Thread.ofVirtual().start(() -> …)` |
+
+#### `javax.*` → `jakarta.*`
+
+The enterprise APIs (servlets, JPA, Bean Validation, transactions, `@PostConstruct`) were part of **Java EE**, under `javax.*`. Oracle handed Java EE to the Eclipse Foundation, which renamed it **Jakarta EE** and, from Jakarta EE 9, had to move the packages to `jakarta.*`. Spring Boot 3 switched to Jakarta EE 10, Boot 4 to Jakarta EE 11.
+
+| Boot 2 (Java EE 8) | Boot 3 and 4 (Jakarta EE) |
+|---|---|
+| `javax.persistence.Entity` | `jakarta.persistence.Entity` |
+| `javax.validation.constraints.NotBlank` | `jakarta.validation.constraints.NotBlank` |
+| `javax.servlet.http.HttpServletRequest` | `jakarta.servlet.http.HttpServletRequest` |
+| `javax.annotation.PostConstruct` | `jakarta.annotation.PostConstruct` |
+| `javax.transaction.Transactional` | `jakarta.transaction.Transactional` |
+
+Not everything named `javax` moved: packages that belong to the JDK itself stay (`javax.sql.DataSource`, `javax.crypto`, `javax.net.ssl`, `javax.annotation.processing`). The `@Generated` at the top of the class MapStruct writes is one of those.
+
+**How to spot a Boot 2 code base:** `javax.persistence` or `javax.servlet` imports; the parent version `2.x` in the POM; a security class that `extends WebSecurityConfigurerAdapter`. The migration is a package rename plus the library upgrades below. The [OpenRewrite](https://docs.openrewrite.org/) recipes for Spring Boot 3 automate most of it.
+
+#### Spring Boot 2 → 3 → 4
+
+| Area | Boot 2.x (to 2023) | Boot 3.x (2022–2026) | Boot 4.x (this project) |
+|---|---|---|---|
+| Java baseline | 8 | 17 | 17 (25 recommended) |
+| Spring Framework | 5 | 6 | 7 |
+| Enterprise APIs | `javax.*` | `jakarta.*` (Jakarta EE 10) | `jakarta.*` (Jakarta EE 11, Servlet 6.1: Tomcat 11; Undertow is gone) |
+| Security config | `extends WebSecurityConfigurerAdapter` | A `SecurityFilterChain` bean | Same, lambda DSL only (`.and()` is removed) |
+| URL rules | `authorizeRequests().antMatchers(...)` | `authorizeHttpRequests(auth -> auth.requestMatchers(...))` | Same |
+| Method security | `@EnableGlobalMethodSecurity(prePostEnabled = true)` | `@EnableMethodSecurity` | Same |
+| Hibernate | 5 | 6 | 7 |
+| JSON | Jackson 2 (`com.fasterxml.jackson.databind`) | Jackson 2 | Jackson 3 (`tools.jackson.databind`; the annotations keep `com.fasterxml.jackson.annotation`) |
+| Starters | `spring-boot-starter-web` + one `spring-boot-starter-test` | Same | One starter per technology, each with a `-test` starter (§2) |
+| Mock beans | `@MockBean`, `@SpyBean` | Deprecated in 3.4 for `@MockitoBean`, `@MockitoSpyBean` | `@MockBean` removed |
+| Tests | JUnit 4 or 5 (JUnit 4 needs the vintage engine) | JUnit 5 | JUnit 6 |
+| Errors | Your own error JSON | `ProblemDetail` (RFC 7807, now 9457) available | Same |
+| HTTP clients | `RestTemplate`, `WebClient` | `RestClient` (3.2), HTTP interfaces | HTTP service groups (`@ImportHttpServices`) |
+| Tracing | Spring Cloud Sleuth | Micrometer Tracing | Same |
+| URL matching | `/api/books/` also matches `/api/books` | The trailing slash no longer matches | Same |
+
+A Boot 2 controller test and the same test now:
+
+```java
+// Boot 2: JUnit 4 runner, @MockBean, public classes
+@RunWith(SpringRunner.class)
+@WebMvcTest(BookController.class)
+public class BookControllerTest {
+    @Autowired private MockMvc mockMvc;
+    @MockBean private BookService service;
+}
+
+// Boot 4 (BookControllerTest in this project): JUnit Jupiter, @MockitoBean, package-private class
+@WebMvcTest(BookController.class)
+class BookControllerTest {
+    @Autowired MockMvcTester mvc;
+    @MockitoBean BookService service;
+}
+```
+
+#### Old security configuration
+
+Until Spring Security 5.7 you extended an adapter class and overrode its methods. It is the first thing you meet in a Boot 2 code base:
+
+```java
+// Boot 2 / Spring Security 5: removed in Spring Security 6
+@Configuration
+@EnableWebSecurity
+@EnableGlobalMethodSecurity(prePostEnabled = true)
+public class SecurityConfig extends WebSecurityConfigurerAdapter {
+
+    @Override
+    protected void configure(HttpSecurity http) throws Exception {
+        http
+            .csrf().disable()
+            .sessionManagement().sessionCreationPolicy(SessionCreationPolicy.STATELESS)
+            .and()
+            .authorizeRequests()
+                .antMatchers("/api/auth/**").permitAll()
+                .antMatchers(HttpMethod.GET, "/api/books/**").authenticated()
+                .antMatchers("/api/books/**").hasRole("LIBRARIAN")
+                .anyRequest().authenticated()
+            .and()
+            .oauth2ResourceServer().jwt();
+    }
+
+    @Bean
+    public PasswordEncoder passwordEncoder() {
+        return new BCryptPasswordEncoder();
+    }
+}
+```
+
+A simplified version of the rules in `security/SecurityConfig` (§5.7) uses a `@Bean SecurityFilterChain securityFilterChain(HttpSecurity http)` method, lambdas instead of `.and()` chains, `requestMatchers` instead of `antMatchers`, and `@EnableMethodSecurity`. The semantics are the same: rules are checked top to bottom, and the first match wins. The adapter was removed because a bean composes better: several chains can coexist, and nothing has to inherit from a framework class.
+
+#### Lombok
+
+Lombok is an annotation processor that writes methods into your classes while javac compiles them. The source stays short; the class file has everything. Before records, almost every Spring code base used it.
+
+| Annotation | Generates | Modern equivalent |
+|---|---|---|
+| `@Getter` / `@Setter` | `getX()` / `setX(...)` for each field | Record accessors (`x()`), no setters |
+| `@ToString`, `@EqualsAndHashCode` | Those methods over every field (`@ToString.Exclude` / `@EqualsAndHashCode.Exclude` leave one out) | A record |
+| `@Data` | `@Getter` + `@Setter` + `@ToString` + `@EqualsAndHashCode` + `@RequiredArgsConstructor` | A record (if it can be immutable) |
+| `@Value` | An immutable `@Data`: private final fields, no setters, final class | A record |
+| `@Builder` | A fluent builder: `X.builder().a(1).b(2).build()` | A constructor, or a hand-written builder like `TestDataFactory.aBookRequest()` (§5.8) |
+| `@NoArgsConstructor`, `@AllArgsConstructor`, `@RequiredArgsConstructor` | Constructors with no fields, all fields, or the `final` (and `@NonNull`) ones | `@RequiredArgsConstructor` on a service = constructor injection (§5.1) |
+| `@Slf4j` | `private static final Logger log = LoggerFactory.getLogger(X.class)` | That line by hand |
+| `@SneakyThrows` | Throws a checked exception without declaring it | Wrap it in an unchecked exception |
+
+`LombokContrastTest` shows what each one produces, and the one difference that bites: **`@Data` equality follows the mutable fields**. Change a field of an object inside a `HashSet` and the set can no longer find it, because its hash code changed. On an entity it is worse: `@Data` hashes the relations too, which loads lazy collections and can recurse forever between the two sides of a relation. That is why entities here write `equals`/`hashCode` by hand (§5.4). A record has the same field-based equality, but its fields cannot be reassigned, so the problem cannot happen (unless a component is itself mutable, such as a `List` you keep adding to).
+
+Reading Lombok code: the IDE needs to know about it (IntelliJ has it built in; VS Code's Java extension supports it). Otherwise every `getTitle()` call shows as an error. `delombok` (a Lombok command) writes the generated source out if you need to see it.
+
+Why this project does not use it: records cover data classes, constructor injection needs one constructor that IDEs generate, and the code you read is the code that runs. In its favour: big mutable classes (JPA entities with many columns) get shorter, and most teams you join will use it.
+
+#### MapStruct and annotation processors
+
+MapStruct generates mappers. You write an interface; at compile time it writes the implementation, matching properties by name:
+
+```java
+@Mapper(unmappedTargetPolicy = ReportingPolicy.ERROR)
+public interface BookLegacyMapper {
+    @Mapping(target = "availableCopies", expression = "java((int) (book.getTotalCopies() - activeLoans))")
+    BookResponse toResponse(Book book, long activeLoans);
+
+    @Mapping(target = "isbn", expression = "java(dev.playground.library.book.Isbn.toIsbn13(request.isbn()))")
+    @Mapping(target = "authors", ignore = true)
+    void apply(UpdateBookRequest request, @MappingTarget Book book);
+}
+```
+
+- Properties with the same name are mapped without a word, even with two source parameters, as long as only one of them has the property (only `Book` has `authors`). What the names cannot say goes into `@Mapping`: a different `source` path, a Java `expression` (a string MapStruct pastes into the generated code), `ignore`, or `qualifiedByName` to pick a helper method. A `default` method on the interface is used wherever its types fit (`sortedSummaries` maps the authors).
+- `@MappingTarget` updates an existing object instead of creating one.
+- `unmappedTargetPolicy = ERROR` turns a target property nobody maps into a compile error. Removing `ignore = true` from `apply` fails the build with *Unmapped target property: "authors"* (the request has `authorIds`, not `authors`). The default is only a compiler warning, easy to miss, and the field stays null.
+- `componentModel = "spring"` makes the implementation a bean you inject; the default needs `Mappers.getMapper(BookLegacyMapper.class)`.
+- The generated `BookLegacyMapperImpl` is plain Java with no reflection: read it in `spring-app/target/generated-test-sources/test-annotations/`.
+
+`MapStructContrastTest` checks that it gives the same result as `BookMapper`. The trade-off: a manual mapper is longer but you read and debug it like any code; MapStruct saves typing on wide DTOs and checks coverage at compile time, but its logic hides in annotations and strings. Do not confuse it with **ModelMapper** or Dozer, which map by reflection at runtime and find mistakes only when the code runs.
+
+**Annotation processors need configuration.** Lombok and MapStruct (and Hibernate's metamodel generator, and Spring Boot's configuration metadata) run inside javac. Since JDK 23, javac no longer runs a processor just because its jar is on the classpath. List it in the compiler plugin (`spring-app/pom.xml` does it for the test sources only):
+
+```xml
+<annotationProcessorPaths>
+    <path><groupId>org.projectlombok</groupId><artifactId>lombok</artifactId><version>${lombok.version}</version></path>
+    <path><groupId>org.mapstruct</groupId><artifactId>mapstruct-processor</artifactId><version>${mapstruct.version}</version></path>
+</annotationProcessorPaths>
+```
+
+A Boot 2 project that only declared the Lombok dependency compiles on JDK 17 or 21 and fails on 25 with dozens of *cannot find symbol: method getTitle()* errors. This project hit exactly that before the configuration was added. With both Lombok and MapStruct on Lombok-annotated classes, add `lombok-mapstruct-binding` to that list, so MapStruct sees the generated getters.
+
+#### Field injection and XML configuration
+
+Field injection is the most common style in old code:
+
+```java
+@Service
+public class BookService {
+    @Autowired
+    private BookRepository repository; // set by reflection after the constructor
+}
+```
+
+It works, but the field cannot be `final`, the dependencies are invisible from outside, and a unit test needs Spring or reflection to fill them. Constructor injection (§5.1) has none of those problems; setter injection (`@Autowired` on a setter) is the rare middle ground, for optional dependencies.
+
+Before annotations and Java configuration, beans were declared in XML:
+
+```xml
+<!-- applicationContext.xml -->
+<beans xmlns="http://www.springframework.org/schema/beans" ...>
+    <context:component-scan base-package="com.example.library"/>
+    <bean id="bookService" class="com.example.library.BookService">
+        <constructor-arg ref="bookRepository"/>
+    </bean>
+</beans>
+```
+
+A `<bean>` is a `@Bean` method, `<constructor-arg ref>` is a constructor parameter, `<context:component-scan>` is `@ComponentScan`. A Boot application can still load such a file with `@ImportResource("classpath:applicationContext.xml")`. Very old applications also have a `web.xml` that registers the `DispatcherServlet` by hand; Boot does it for you.
+
+#### A `.war` in an external Tomcat
+
+§3 explains the model. To package a Boot application that way:
+
+```xml
+<packaging>war</packaging>
+...
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-tomcat</artifactId>
+    <scope>provided</scope> <!-- the server already has Tomcat: compile against it, do not package it -->
+</dependency>
+```
+
+```java
+@SpringBootApplication
+public class LibraryApplication extends SpringBootServletInitializer {
+
+    @Override // called by the external Tomcat instead of main()
+    protected SpringApplicationBuilder configure(SpringApplicationBuilder builder) {
+        return builder.sources(LibraryApplication.class);
+    }
+
+    public static void main(String[] args) { // still runnable with java -jar
+        SpringApplication.run(LibraryApplication.class, args);
+    }
+}
+```
+
+The server must match the servlet API: a Boot 2 war (`javax.servlet`) needs Tomcat 9 (or 8.5), a Boot 3 war Tomcat 10.1, a Boot 4 war Tomcat 11. Configuration then comes partly from the server (port, context path such as `/library`, connection pools via JNDI). The executable jar puts all of that in the application, which is why new projects use it.
+
+#### Gradle
+
+The other build tool. Same Maven Central, same dependencies, a script instead of XML. This project's build would start like this in `build.gradle.kts`:
+
+```kotlin
+plugins {
+    java
+    id("org.springframework.boot") version "4.1.1"
+}
+
+java { toolchain { languageVersion = JavaLanguageVersion.of(25) } }
+
+repositories { mavenCentral() }
+
+dependencies {
+    // The Spring Boot BOM, like the parent POM's dependency management
+    implementation(platform(org.springframework.boot.gradle.plugin.SpringBootPlugin.BOM_COORDINATES))
+    implementation("org.springframework.boot:spring-boot-starter-webmvc")
+    implementation("org.springframework.boot:spring-boot-starter-data-jpa")
+    runtimeOnly("org.postgresql:postgresql")
+    testImplementation("org.springframework.boot:spring-boot-starter-webmvc-test")
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+    // Lombok in a Gradle build: the processor path is explicit, and it needs the BOM too
+    // (annotationProcessor does not extend implementation, so it would have no version)
+    compileOnly("org.projectlombok:lombok")
+    annotationProcessor(platform(org.springframework.boot.gradle.plugin.SpringBootPlugin.BOM_COORDINATES))
+    annotationProcessor("org.projectlombok:lombok")
+}
+
+tasks.test { useJUnitPlatform() }
+```
+
+| Maven | Gradle |
+|---|---|
+| `compile` / `runtime` / `test` / `provided` scope | `implementation` / `runtimeOnly` / `testImplementation` / `compileOnly` |
+| `./mvnw verify` | `./gradlew build` |
+| `./mvnw spring-boot:run` | `./gradlew bootRun` |
+| `./mvnw -pl spring-app test` | `./gradlew :spring-app:test` |
+| `target/` | `build/` |
+| Lifecycle phases with plugin goals bound to them | A graph of tasks; builds are incremental and cached |
+
+Gradle is faster on big multi-module builds and more flexible; Maven is more uniform, so one Maven project reads like any other. Both are common in Spring jobs; Android uses Gradle.
+
+#### Server-side views: Thymeleaf
+
+This project is an API. Many Spring applications render HTML on the server instead, which is the Razor Pages / MVC views model. A `@Controller` (not `@RestController`) returns a view name and fills a `Model`:
+
+```java
+@Controller
+class BookPageController {
+    private final BookService bookService; // injected through the constructor (not shown)
+
+    @GetMapping("/books")
+    String list(Model model) {
+        model.addAttribute("books", bookService.findAll(null, null, PageRequest.of(0, 20)).content());
+        return "books"; // src/main/resources/templates/books.html
+    }
+}
+```
+
+```html
+<table>
+  <tr th:each="book : ${books}">
+    <td th:text="${book.title}">Placeholder title</td>
+    <td th:text="${book.availableCopies}">0</td>
+  </tr>
+</table>
+```
+
+Thymeleaf templates are valid HTML (the `th:` attributes replace the placeholder text), so a designer can open them in a browser. Older code uses **JSP** (`.jsp` files with `<c:forEach>` tags), which only works in a `.war`.
+
+#### Packaging and running the jar
+
+`spring-boot:run` is for development. What you deploy is the jar:
+
+```bash
+./mvnw -pl spring-app package -DskipTests
+docker compose -f spring-app/compose.yaml up -d
+java -jar spring-app/target/spring-app-0.0.1-SNAPSHOT.jar --spring.profiles.active=dev --spring.datasource.url=jdbc:postgresql://localhost:5432/library --spring.datasource.username=library --spring.datasource.password=library
+```
+
+- `package` builds `spring-app-0.0.1-SNAPSHOT.jar` (about 67 MB): the *fat jar*, with your classes in `BOOT-INF/classes`, every dependency in `BOOT-INF/lib` (Tomcat included) and Spring Boot's launcher at the root. `.jar.original` next to it is the plain jar before Boot repackaged it.
+- **The jar does not start PostgreSQL.** `spring-boot-docker-compose` is left out of the packaged jar on purpose (it is a development tool), so you start the database yourself and pass the connection: here as `--key=value` arguments. In production they would be environment variables (`SPRING_DATASOURCE_URL`…) and the JWT secret would come from `LIBRARY_SECURITY_JWT_SECRET`, not from the dev profile.
+- Test-scope dependencies are not in it: no JUnit, no Lombok, no MapStruct (`jar tf` lists the contents).
+
+Two concepts you will meet around the jar:
+- **Layered jars.** `BOOT-INF/layers.idx` splits the jar into layers (dependencies, the Spring Boot loader, snapshot dependencies, your classes). `java -Djarmode=tools -jar app.jar extract --layers` unpacks them, so a Dockerfile copies each one separately: a code change rebuilds only the small last layer of the image.
+- **Buildpacks.** `./mvnw -pl spring-app spring-boot:build-image` builds a container image with no Dockerfile (Paketo buildpacks pick the JDK and the layers). It needs Docker.
+
+**Try it.** Run the commands above, then `curl http://localhost:8080/api/info` and `curl http://localhost:8080/actuator/info`. Stop the app with `Ctrl+C` and the database with `docker compose -f spring-app/compose.yaml down`.
+
+**Tests in this chapter:** `Java8StyleTest` (java-core), `LombokContrastTest` and `MapStructContrastTest` (spring-app). All are unit tests: no Spring context, no Docker.
 
 ---
 
@@ -2255,7 +2586,9 @@ _Written in Phase 13._
 
 ## Appendix: Coming from .NET
 
-A map for orientation, not a claim that the pieces are identical. It grows with every chapter.
+A map for orientation, not a claim that the pieces are identical, grouped by topic. A § in the notes points to the chapter that explains the row.
+
+### Platform and build
 
 | .NET | Java / Spring | Notes |
 |---|---|---|
@@ -2270,6 +2603,11 @@ A map for orientation, not a claim that the pieces are identical. It grows with 
 | Kestrel | Embedded Tomcat | |
 | `Program.cs` + `WebApplication.CreateBuilder` | `@SpringBootApplication` class + `main` | |
 | IIS hosting an app | `.war` deployed to a standalone Tomcat | The legacy model |
+
+### Language
+
+| .NET | Java / Spring | Notes |
+|---|---|---|
 | `record` / `record class` | `record` | Java record fields are always final (shallowly immutable); records cannot inherit; no `with` expressions |
 | `sealed` class (blocks inheritance) | `final` class | Java's `sealed` means something else: see the next row |
 | Closed hierarchies, F# discriminated unions | `sealed interface ... permits` + records | The compiler checks `switch` exhaustiveness |
@@ -2283,6 +2621,12 @@ A map for orientation, not a claim that the pieces are identical. It grows with 
 | `internal` | package-private (no modifier) | Java's default visibility is the package, not private |
 | `==` on `string` compares values | `==` compares references; use `equals` | See "Things that trip you up" |
 | Boxed `int` (`object`, `int?`) | `Integer` (wrapper class) | `==` on two `Integer`s compares references: true inside the -128..127 cache, false outside |
+| Nullable reference types (`string?`), `?.`, `??` | `Optional<T>` with `map`, `orElse` | Only for return values; fields and parameters are plain (nullable) references |
+
+### Collections and functional code
+
+| .NET | Java / Spring | Notes |
+|---|---|---|
 | `List<T>` / `Dictionary<K,V>` / `HashSet<T>` | `ArrayList` / `HashMap` / `HashSet` (declared as `List` / `Map` / `Set`) | Java declares variables by interface by convention |
 | `SortedDictionary` / `SortedSet` | `TreeMap` / `TreeSet` | |
 | `IReadOnlyList<T>` / `ReadOnlyCollection<T>` (a read-only view) | `Collections.unmodifiableList(list)` | Changes to the underlying list show through. Still typed as `List`: `add` compiles and throws at runtime |
@@ -2292,7 +2636,28 @@ A map for orientation, not a claim that the pieces are identical. It grows with 
 | `Func<...>` / `Action<T>` / `Predicate<T>` | `Function`, `BiFunction`, `Supplier` / `Consumer` / `Predicate` | Java uses ordinary (generic) interfaces instead of delegate types |
 | Delegates, method groups | Functional interfaces, method references (`String::length`) | |
 | LINQ to Objects | Streams API | Both lazy. No query syntax, and a stream is single-use (see below) |
-| Nullable reference types (`string?`), `?.`, `??` | `Optional<T>` with `map`, `orElse` | Only for return values; fields and parameters are plain (nullable) references |
+
+**LINQ ↔ Streams**
+
+| LINQ | Streams |
+|---|---|
+| `Where` | `filter` |
+| `Select` | `map` |
+| `SelectMany` | `flatMap` |
+| `OrderBy` / `ThenBy` | `sorted(Comparator.comparing(...).thenComparing(...))` |
+| `Take` / `Skip` | `limit` / `skip` |
+| `Distinct` | `distinct` |
+| `First()` / `FirstOrDefault()` | `findFirst().orElseThrow()` / `findFirst().orElse(null)` (or keep the `Optional`) |
+| `Any` / `All` | `anyMatch` / `allMatch` |
+| `Count` / `Sum` / `Aggregate` | `count` / `mapToInt(...).sum()` / `reduce` |
+| `GroupBy` | `collect(groupingBy(...))` |
+| `ToList` / `ToDictionary` | `toList()` / `collect(toMap(...))` |
+| `string.Join` | `collect(joining(", "))` |
+
+### Concurrency
+
+| .NET | Java / Spring | Notes |
+|---|---|---|
 | `Thread` | `Thread` | Same idea; `Thread.ofPlatform()` / `Thread.ofVirtual()` builders |
 | `ThreadPool`, `Task.Run` | `ExecutorService` (`Executors.newFixedThreadPool`…) | Java makes you pick and close the pool |
 | `Task<T>` | `CompletableFuture<T>` | `ContinueWith` ↔ `thenApply`/`thenCompose`, `Task.WhenAll` ↔ `allOf` (which returns `Void`, not the results), `.Result`/`.Wait()` ↔ `join()`/`get()` |
@@ -2303,6 +2668,11 @@ A map for orientation, not a claim that the pieces are identical. It grows with 
 | `ConcurrentDictionary.AddOrUpdate` | `ConcurrentHashMap.merge` / `compute` | Opposite guarantee: .NET may run the update delegate more than once, outside the lock. Java runs it once, atomically, holding a lock, so keep it short and do not touch the map inside it |
 | `CancellationToken` | `Thread.interrupt()` / `Future.cancel(true)` | Interruption is cooperative too. `cancel(true)` interrupts only executor tasks; on a `CompletableFuture` it marks the future cancelled and the work keeps running |
 | `AggregateException` from `.Result` | `ExecutionException` (`get`) / `CompletionException` (`join`) | The real exception is the cause |
+
+### Dependency injection, configuration and hosting
+
+| .NET | Java / Spring | Notes |
+|---|---|---|
 | `IServiceCollection` + `services.AddScoped<IFoo, Foo>()` | Component scanning (`@Component`/`@Service`…) or `@Bean` methods | Spring discovers beans by scanning packages instead of explicit registration |
 | Lifetimes: Singleton / Scoped / Transient | Scopes: `singleton` / `request` / `prototype` | Spring's default is singleton, where .NET makes you pick. Not exact matches: a Spring prototype's `@PreDestroy` never runs, while .NET disposes transients with their scope |
 | Constructor injection | Constructor injection | Same idea; one constructor needs no annotation |
@@ -2315,8 +2685,11 @@ A map for orientation, not a claim that the pieces are identical. It grows with 
 | `ILogger<T>` | SLF4J `Logger` via `LoggerFactory.getLogger(T.class)` | Logback is the default provider |
 | `IHostedService`, `IHostApplicationLifetime.ApplicationStarted` | `ApplicationRunner`, `@EventListener(ApplicationReadyEvent.class)` | A hosted service starts before the server listens; an `ApplicationRunner` runs after Tomcat has started |
 | `IDisposable` on a service | `@PreDestroy` | |
-| `WebApplicationFactory<T>` | `@SpringBootTest` (whole app) or slices such as `@WebMvcTest` | Slices have no direct .NET equivalent |
-| `factory.CreateClient()` (in-memory `TestServer`) | `MockMvc` / `MockMvcTester` | No socket in either. For a real port: `RANDOM_PORT` + `RestTestClient` (§5.8) |
+
+### Web and REST
+
+| .NET | Java / Spring | Notes |
+|---|---|---|
 | `[ApiController]` + `ControllerBase` | `@RestController` | |
 | `[Route("api/books")]`, `[HttpGet("{id}")]` | `@RequestMapping("/api/books")`, `@GetMapping("/{id}")` | |
 | `[FromRoute]` / `[FromQuery]` / `[FromBody]` | `@PathVariable` / `@RequestParam` / `@RequestBody` | Spring does not infer the body: `@RequestBody` is required |
@@ -2326,15 +2699,12 @@ A map for orientation, not a claim that the pieces are identical. It grows with 
 | `NoContent()` / `NotFound()` | `@ResponseStatus(NO_CONTENT)` / an exception mapped to 404 | |
 | `System.Text.Json` | Jackson (3 in Boot 4) | Both ignore unknown JSON properties by default |
 | Swashbuckle / `Microsoft.AspNetCore.OpenApi` | springdoc-openapi | `/v3/api-docs` + `/swagger-ui.html` |
-| Moq `Setup(...).Returns(...)` / `Verify(...)` | Mockito `given(...).willReturn(...)` / `verify(...)` | `@MockitoBean` puts the mock in the Spring context |
-| Moq `It.IsAny<T>()`, `Callback(...)` to capture | `any()`, `ArgumentCaptor` | |
-| xUnit / NUnit | JUnit (6 in Boot 4; the Jupiter API of JUnit 5) + AssertJ | Like xUnit, JUnit creates a new test class instance per test |
-| `[Fact]` / `[Theory]` + `[InlineData]` / `[MemberData]` | `@Test` / `@ParameterizedTest` + `@CsvSource` / `@MethodSource` | §5.8 |
-| Nested classes for grouping | `@Nested` | |
-| `IClassFixture<T>`, collection fixtures | Spring's test context cache | Shared automatically by tests with the same configuration (§5.8) |
-| Testcontainers for .NET | Testcontainers + `@ServiceConnection` | Same project family |
-| coverlet (`--collect:"XPlat Code Coverage"`) | JaCoCo (`target/site/jacoco`) | |
 | `.http` files in Visual Studio / Rider | `.http` files with VS Code REST Client or IntelliJ | Nearly the same syntax |
+
+### Validation and errors
+
+| .NET | Java / Spring | Notes |
+|---|---|---|
 | DataAnnotations: `[Required]`, `[StringLength]`, `[Range]`, `[RegularExpression]` | Bean Validation: `@NotBlank`/`@NotNull`, `@Size`, `@Min`/`@Max`, `@Pattern` | Same idea: attributes on the model, checked by a framework |
 | A custom `ValidationAttribute` / `IValidatableObject` | A custom constraint + `ConstraintValidator` / a class-level constraint | |
 | FluentValidation | No standard equivalent | Custom constraints, or a validator you call from the service |
@@ -2343,6 +2713,11 @@ A map for orientation, not a claim that the pieces are identical. It grows with 
 | `ProblemDetails`, `Results.Problem(...)` | `ProblemDetail.forStatusAndDetail(...)` | RFC 9457 in both |
 | `UseExceptionHandler` / `IExceptionHandler` / exception filters | `@RestControllerAdvice` + `@ExceptionHandler` | |
 | `services.AddOptions<T>().ValidateDataAnnotations().ValidateOnStart()` | `@Validated` on a `@ConfigurationProperties` class | The bean is validated when it is created, which is at startup; there is no separate `ValidateOnStart` step |
+
+### Persistence
+
+| .NET | Java / Spring | Notes |
+|---|---|---|
 | EF Core | JPA (the spec) + Hibernate (the implementation) + Spring Data JPA (repositories) | Three layers where .NET has one library |
 | `DbContext` | `EntityManager` / the persistence context | One per transaction; you rarely touch it directly, the repositories do |
 | `DbSet<Book>` + your own repository class | `interface BookRepository extends JpaRepository<Book, Long>` | Spring Data writes the implementation |
@@ -2365,11 +2740,21 @@ A map for orientation, not a claim that the pieces are identical. It grows with 
 | Connection string in `appsettings.json` | `spring.datasource.*`, or none: Docker Compose support / `@ServiceConnection` | |
 | .NET Aspire / Testcontainers for .NET | `spring-boot-docker-compose` / Testcontainers for Java | The Java Testcontainers is the original |
 | `DbUpdateException` (unique index violation) | `DataIntegrityViolationException` | Spring translates every vendor's SQL errors into one `DataAccessException` hierarchy |
+
+### Transactions
+
+| .NET | Java / Spring | Notes |
+|---|---|---|
 | `SaveChanges()` (its own transaction), `BeginTransaction()`, `TransactionScope` | `@Transactional` on the service method, or `TransactionTemplate` | Declarative, through a proxy (§5.6) |
 | `TransactionScopeOption.RequiresNew` | `@Transactional(propagation = Propagation.REQUIRES_NEW)` | Also a second connection |
 | `BeginTransaction(IsolationLevel.Serializable)` | `@Transactional(isolation = Isolation.SERIALIZABLE)` | |
 | `[ConcurrencyCheck]`, `[Timestamp]` / `IsRowVersion()` | `@Version` | SQL Server bumps a `rowversion` itself; Hibernate bumps `@Version` in its own UPDATE |
 | `DbUpdateConcurrencyException` | `ObjectOptimisticLockingFailureException` | Spring's translation of Hibernate's `StaleObjectStateException` |
+
+### Security
+
+| .NET | Java / Spring | Notes |
+|---|---|---|
 | Middleware pipeline (`UseAuthentication`, `UseAuthorization`) | The `SecurityFilterChain` (servlet filters before the `DispatcherServlet`) | Order matters in both |
 | `AddAuthentication().AddJwtBearer(...)` | `.oauth2ResourceServer(rs -> rs.jwt(...))` + a `JwtDecoder` | With an identity provider both take just the authority / `issuer-uri` |
 | `[Authorize]`, `[Authorize(Roles = "Librarian")]`, `[AllowAnonymous]` | URL rules (`authenticated()`, `hasRole(...)`, `permitAll()`) or `@PreAuthorize("hasRole('LIBRARIAN')")` | Spring prefers central URL rules; attributes are the method-security flavour |
@@ -2381,6 +2766,26 @@ A map for orientation, not a claim that the pieces are identical. It grows with 
 | `AddCors` + `UseCors` | `CorsConfigurationSource` bean + `.cors(...)` in the chain | |
 | Antiforgery tokens | Spring Security's CSRF protection (on by default) | Off for a bearer-token API in both |
 | User secrets / environment variables for signing keys | Profile-specific YAML for dev, environment variables elsewhere | `LIBRARY_SECURITY_JWT_SECRET` ↔ `library.security.jwt.secret` |
+
+### Testing
+
+| .NET | Java / Spring | Notes |
+|---|---|---|
+| `WebApplicationFactory<T>` | `@SpringBootTest` (whole app) or slices such as `@WebMvcTest` | Slices have no direct .NET equivalent |
+| `factory.CreateClient()` (in-memory `TestServer`) | `MockMvc` / `MockMvcTester` | No socket in either. For a real port: `RANDOM_PORT` + `RestTestClient` (§5.8) |
+| Moq `Setup(...).Returns(...)` / `Verify(...)` | Mockito `given(...).willReturn(...)` / `verify(...)` | `@MockitoBean` puts the mock in the Spring context |
+| Moq `It.IsAny<T>()`, `Callback(...)` to capture | `any()`, `ArgumentCaptor` | |
+| xUnit / NUnit | JUnit (6 in Boot 4; the Jupiter API of JUnit 5) + AssertJ | Like xUnit, JUnit creates a new test class instance per test |
+| `[Fact]` / `[Theory]` + `[InlineData]` / `[MemberData]` | `@Test` / `@ParameterizedTest` + `@CsvSource` / `@MethodSource` | §5.8 |
+| Nested classes for grouping | `@Nested` | |
+| `IClassFixture<T>`, collection fixtures | Spring's test context cache | Shared automatically by tests with the same configuration (§5.8) |
+| Testcontainers for .NET | Testcontainers + `@ServiceConnection` | Same project family |
+| coverlet (`--collect:"XPlat Code Coverage"`) | JaCoCo (`target/site/jacoco`) | |
+
+### Beyond CRUD
+
+| .NET | Java / Spring | Notes |
+|---|---|---|
 | `HttpClient` + `IHttpClientFactory`, Refit | `RestClient`, HTTP interfaces (`@HttpExchange` + `@ImportHttpServices`) | Refit is the closest match to an HTTP interface; named clients ↔ service groups |
 | `HttpClient.Timeout`, Polly timeouts | `spring.http.serviceclient.<group>.connect-timeout` / `read-timeout` | `HttpClient` has one 100 s timeout by default; the JDK client has no read timeout unless you set one |
 | `IMemoryCache` / `IDistributedCache`, output caching | `@Cacheable` / `@CacheEvict` + a `CacheManager` (in-memory, Caffeine, Redis) | Spring caches method results declaratively, through a proxy |
@@ -2390,22 +2795,19 @@ A map for orientation, not a claim that the pieces are identical. It grows with 
 | Health checks (`AddHealthChecks`, `MapHealthChecks`) | Actuator `/actuator/health` | |
 | `System.Diagnostics.Metrics`, OpenTelemetry | Micrometer, `/actuator/metrics` | |
 
-**LINQ ↔ Streams**
+### Legacy, packaging and ecosystem
 
-| LINQ | Streams |
-|---|---|
-| `Where` | `filter` |
-| `Select` | `map` |
-| `SelectMany` | `flatMap` |
-| `OrderBy` / `ThenBy` | `sorted(Comparator.comparing(...).thenComparing(...))` |
-| `Take` / `Skip` | `limit` / `skip` |
-| `Distinct` | `distinct` |
-| `First()` / `FirstOrDefault()` | `findFirst().orElseThrow()` / `findFirst().orElse(null)` (or keep the `Optional`) |
-| `Any` / `All` | `anyMatch` / `allMatch` |
-| `Count` / `Sum` / `Aggregate` | `count` / `mapToInt(...).sum()` / `reduce` |
-| `GroupBy` | `collect(groupingBy(...))` |
-| `ToList` / `ToDictionary` | `toList()` / `collect(toMap(...))` |
-| `string.Join` | `collect(joining(", "))` |
+| .NET | Java / Spring | Notes |
+|---|---|---|
+| `dotnet publish` | `./mvnw package` | The output is one executable jar (§6) |
+| `dotnet app.dll` | `java -jar app.jar` | Both need the runtime installed; neither is a native executable |
+| `dotnet publish /t:PublishContainer` | `./mvnw spring-boot:build-image` (Buildpacks) | A container image without a Dockerfile |
+| .NET Framework → .NET Core (a breaking migration) | Boot 2 → 3: `javax.*` → `jakarta.*`, Java 17 | The one big break you migrate across in old code bases (§6) |
+| .NET Upgrade Assistant | OpenRewrite recipes | Automated migrations |
+| C# records, auto-properties, source generators | Lombok | Lombok rewrites the class at compile time; records replaced most of it (§6) |
+| Mapperly (source generator) | MapStruct | Both generate the mapping code at compile time |
+| AutoMapper | ModelMapper, Dozer | Reflection at runtime: mistakes show up when the code runs |
+| Razor views / Razor Pages | Thymeleaf (`@Controller` + a template) | JSP is the old equivalent, closer to classic ASP / `.aspx` markup |
 
 ### Things that trip you up
 
@@ -2448,3 +2850,6 @@ A map for orientation, not a claim that the pieces are identical. It grows with 
 - **A Spring cron has six fields.** `0 8 * * *` from a Unix crontab fails to parse; the seconds come first: `0 0 8 * * *` (§5.9).
 - **Pages start at 0.** `?page=1` is the second page.
 - **The schema is not generated from the classes.** Flyway runs your SQL; Hibernate only validates. Adding a field to an entity means writing a migration too, or the app does not start.
+- **Old code is still `javax`.** A tutorial or Stack Overflow answer with `javax.persistence` or `javax.validation` imports is for Boot 2. In Boot 3 and 4 those annotations are not on the classpath, or worse, an old jar brings them and Hibernate ignores them: *"Not a managed type"* (§6).
+- **Annotation processors are off unless configured.** Since JDK 23, Lombok or MapStruct on the classpath is not enough; list them in `annotationProcessorPaths`, or every generated getter is a *cannot find symbol* (§6).
+- **`Collectors.toList()` and `toList()` are not interchangeable.** The old one returns a list you can add to; the new one throws on `add`. Modernising a stream can break code further down (§6).
