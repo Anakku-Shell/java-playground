@@ -2119,7 +2119,7 @@ OpenLibraryBook found = find(isbn13);                 // network, no transaction
 return transaction.execute(status -> save(found));    // short read-write transaction
 ```
 
-`TransactionTemplate` is the programmatic form of `@Transactional`, for when the boundary sits in the middle of a method. `BookImportServiceTest.asksOpenLibraryBeforeOpeningTheTransaction` pins the order. Authors are matched by name ("Frank Herbert" from Open Library is the demo data's Frank Herbert); a real catalogue would store Open Library's id in a column and match on that.
+`TransactionTemplate` is the programmatic form of `@Transactional`, for when the boundary sits in the middle of a method. `BookImportServiceTest.asksOpenLibraryBeforeOpeningTheTransaction` pins the order with mocks. `BookImportIT` checks the effect on the real stack: it runs the whole import (controller, service, HTTP client against `OpenLibraryStub`, PostgreSQL), and while the stub answers each remote request it reads HikariCP's count of connections in use, which must be 0. Put `@Transactional` on `importBook` and that count becomes 1. Authors are matched by name ("Frank Herbert" from Open Library is the demo data's Frank Herbert); a real catalogue would store Open Library's id in a column and match on that.
 
 #### Caching
 
@@ -2172,12 +2172,15 @@ Three things to know. The scheduler has one thread by default (`spring.task.sche
 
 #### `@Async` and executors
 
-`@Async` on a method makes the call return at once while the method runs on another thread. `@EnableAsync` switches it on; `config/AsyncConfig` implements `AsyncConfigurer` to choose the executor:
+`@Async` on a method makes the call return at once while the method runs on another thread. `@EnableAsync` switches it on; `config/AsyncConfig` declares the executor as a bean and an `AsyncConfigurer` bean that hands it to `@Async`:
 
 ```java
 SimpleAsyncTaskExecutor executor = new SimpleAsyncTaskExecutor("async-");
-executor.setVirtualThreads(true);   // one virtual thread per task: no pool to size
+executor.setVirtualThreads(true);          // one virtual thread per task: no pool to size
+executor.setTaskTerminationTimeout(10_000); // close() waits up to 10 s for running tasks
 ```
+
+**Shutting down.** As a bean, the executor is closed by Spring when the application stops, and with a termination timeout `close()` waits for the tasks still running: after 10 s it interrupts the ones left, and it rejects new tasks from the start of the close. Created inside the configurer instead, it is not a bean and nobody closes it; virtual threads are daemon threads, which never keep the JVM alive, so a notification halfway through is simply cut off when the JVM exits. `AsyncConfigTest.closingTheContextWaitsForRunningTasks` starts a half-second task, closes the context, and checks the task finished. `SimpleAsyncTaskExecutor` waits while the beans are destroyed, after the web server and the Kafka listeners have stopped; a `ThreadPoolTaskExecutor` is a `SmartLifecycle` and waits earlier, in the stop phase. Being an `Executor` bean, it also makes Boot skip its own `applicationTaskExecutor` (unless `spring.task.execution.mode=force`).
 
 Without it, Boot's own executor is used: a pool of 8 platform threads, or virtual threads when `spring.threads.virtual.enabled=true`. That property also moves Tomcat's request threads and the scheduler onto virtual threads, a bigger change than this chapter needs. `AsyncConfig` also sets an `AsyncUncaughtExceptionHandler`, because a `void` `@Async` method has no caller left to throw to. A method that returns `CompletableFuture<T>` hands its result, or its exception, to the caller instead.
 
@@ -2230,7 +2233,7 @@ management:
 
 Why not expose everything? `env` and `configprops` list every configuration key; since Boot 3 every value shows as `******` by default, but `management.endpoint.env.show-values: always` (or `when-authorized`) reveals all of them in plain text, secrets included, unless you add a `SanitizingFunction` (Boot 2 masked only keys that looked secret, such as `password`). `beans` maps the application's internals, and `heapdump` hands over the memory, passwords and tokens included. Expose what you use, and secure what you expose. In production the management endpoints often move to a separate port (`management.server.port`) that only the internal network reaches, and metrics are scraped rather than read by hand: add `micrometer-registry-prometheus` and a Prometheus server reads `/actuator/prometheus`.
 
-**Tests in this chapter:** `OpenLibraryClientTest` (stub server, timeout), `OpenLibraryCachingTest`, `BookImportServiceTest`, the import cases in `BookControllerTest` (201, 400, 403, 502), the overdue cases in `LoanServiceTest`, `LoanRepositoryIT`, `LoanControllerIT` and `LoanSecurityIT`, `OverdueLoanJobTest`, `LoanEventsIT` and `ActuatorIT`. The last two have the same setup as the other MockMvc ITs, so they share that context and start no container (§5.8).
+**Tests in this chapter:** `OpenLibraryClientTest` (stub server, timeout), `OpenLibraryCachingTest`, `BookImportServiceTest`, `BookImportIT` (the whole import, no connection held during the remote calls; its own context, since it points Open Library at the stub), the import cases in `BookControllerTest` (201, 400, 403, 502), the overdue cases in `LoanServiceTest`, `LoanRepositoryIT`, `LoanControllerIT` and `LoanSecurityIT`, `OverdueLoanJobTest`, `AsyncConfigTest`, `LoanEventsIT` and `ActuatorIT`. The last two have the same setup as the other MockMvc ITs, so they share that context and start no container (§5.8).
 
 ### 5.10 Kafka
 

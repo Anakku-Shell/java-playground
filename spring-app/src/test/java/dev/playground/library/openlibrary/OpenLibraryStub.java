@@ -18,18 +18,19 @@ import java.util.concurrent.Executors;
  * redirect being followed; this can. Paths without a route answer 404, like Open Library.
  * Guide: §5.9 Beyond CRUD.
  */
-final class OpenLibraryStub implements AutoCloseable {
+public final class OpenLibraryStub implements AutoCloseable {
 
     private record Route(int status, String body, String location, Duration delay) {}
 
     private final HttpServer server;
     private final Map<String, Route> routes = new ConcurrentHashMap<>();
+    private volatile Runnable onRequest = () -> {};
 
     private OpenLibraryStub(HttpServer server) {
         this.server = server;
     }
 
-    static OpenLibraryStub start() {
+    public static OpenLibraryStub start() {
         try {
             // Port 0: the operating system picks a free one, so parallel builds never collide.
             HttpServer server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
@@ -44,32 +45,41 @@ final class OpenLibraryStub implements AutoCloseable {
         }
     }
 
-    String baseUrl() {
+    public String baseUrl() {
         return "http://localhost:" + server.getAddress().getPort();
     }
 
-    void json(String path, String body) {
+    public void json(String path, String body) {
         routes.put(path, new Route(200, body, null, Duration.ZERO));
     }
 
-    void html(String path, String body) {
+    public void html(String path, String body) {
         routes.put(path, new Route(200, body, null, Duration.ZERO));
     }
 
-    void status(String path, int status) {
+    public void status(String path, int status) {
         routes.put(path, new Route(status, "", null, Duration.ZERO));
     }
 
-    void redirect(String path, String location) {
+    public void redirect(String path, String location) {
         routes.put(path, new Route(302, "", location, Duration.ZERO));
     }
 
-    void slow(String path, Duration delay, String body) {
+    public void slow(String path, Duration delay, String body) {
         routes.put(path, new Route(200, body, null, delay));
     }
 
-    void reset() {
+    /**
+     * Runs on every request, before it is answered: while the application is waiting on this
+     * server. {@code BookImportIT} looks at the connection pool from here.
+     */
+    public void onRequest(Runnable hook) {
+        onRequest = hook;
+    }
+
+    public void reset() {
         routes.clear();
+        onRequest = () -> {};
     }
 
     @Override
@@ -80,6 +90,7 @@ final class OpenLibraryStub implements AutoCloseable {
     private void handle(HttpExchange exchange) throws IOException {
         Route route = routes.getOrDefault(exchange.getRequestURI().getPath(), new Route(404, "", null, Duration.ZERO));
         try (exchange) {
+            onRequest.run();
             if (route.delay().isPositive()) {
                 Thread.sleep(route.delay());
             }
