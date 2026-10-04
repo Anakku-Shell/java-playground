@@ -242,11 +242,12 @@ Spring Boot inverts this: **your app owns `main()` and starts an embedded Tomcat
 - an audit trail of loan requests: `/api/audit-events` (§5.6);
 - registration and login, `/api/auth/*` (§5.7). Every other endpoint except `/api/info` and the API docs needs a JWT bearer token, and roles and ownership decide what it may do;
 - book import from Open Library, `/api/books/import/{isbn}`, overdue loans with a daily job, a notification after each borrow, and Actuator under `/actuator` (§5.9);
+- with the dev profile, every loan published to Kafka and counted by a consumer: `/api/stats/loans` (§5.10);
 - Swagger UI at `/swagger-ui.html`.
 
 The legacy chapter (§6) adds no endpoint: its examples are tests (`legacy` packages in both modules).
 
-Request bodies are validated, and every error is an RFC 9457 `ProblemDetail` (§5.3). On `spring-boot:run`, Spring Boot starts PostgreSQL in Docker and Flyway creates the schema before Tomcat opens the port. `LibraryApplicationIT` (`@SpringBootTest` on a throwaway PostgreSQL) boots the same context in a test, so a broken configuration fails the build.
+Request bodies are validated, and every error is an RFC 9457 `ProblemDetail` (§5.3). On `spring-boot:run`, Spring Boot starts PostgreSQL (and a Kafka broker) in Docker and Flyway creates the schema before Tomcat opens the port. `LibraryApplicationIT` (`@SpringBootTest` on a throwaway PostgreSQL) boots the same context in a test, so a broken configuration fails the build.
 
 ---
 
@@ -1910,14 +1911,16 @@ Both plugins run every test of the module before reporting. A failing unit test 
 
 Starting a Spring context (plus a PostgreSQL container) takes seconds. The test framework keeps every context it starts in a cache, keyed by the test's **configuration**: the annotation and its attributes, `@Import`ed classes, active profiles, properties, and every `@MockitoBean`/`@MockitoSpyBean`. Two test classes with the same key share one context; anything different gets a new one.
 
-This suite starts **9 contexts** (so 9 containers, one `@Bean` each in `TestcontainersConfiguration`):
+This suite starts **11 contexts**, so 12 containers: a PostgreSQL in each (one `@Bean` in `TestcontainersConfiguration`), plus a Kafka broker for `LoanKafkaIT` (`KafkaTestcontainersConfiguration`):
 
 | Context | Test classes |
 |---|---|
 | `@SpringBootTest` + `@AutoConfigureMockMvc` | `AuthorControllerIT`, `BookControllerIT`, `LoanControllerIT`, `LoanSecurityIT`, `LoanConcurrencyIT`, `MemberControllerIT`, `AuthControllerIT`, `JwtAuthIT`, `LoanEventsIT`, `ActuatorIT` |
 | `RANDOM_PORT` | `ApiSmokeIT` |
 | plain `@SpringBootTest` | `LibraryApplicationIT` |
-| the dev profile | `DemoDataIT` |
+| the dev profile (Kafka off) | `DemoDataIT` |
+| Open Library pointed at a stub | `BookImportIT` |
+| Kafka on + a Kafka container | `LoanKafkaIT` |
 | `webEnvironment = NONE` + its own beans | `TransactionBehaviourIT` |
 | `@DataJpaTest` + 4 different setups | `BookRepositoryIT`, `BookQueriesIT` (imports `BookService`, has a spy), `LoanRepositoryIT` (statistics on), `AuditingIT` (mocks the `Clock`) |
 
@@ -2018,7 +2021,7 @@ Security in tests (`@WithMockUser`, `jwt()`, real tokens) is in §5.7.
 
 **Coverage.** `./mvnw verify` writes `spring-app/target/site/jacoco/index.html`: lines and branches per package, class and method, with the source coloured by what ran. JaCoCo's agent rides on the `argLine` that Surefire and Failsafe already pass to their JVMs, and the report runs in `post-integration-test`, so it counts both kinds of test. The agent *appends* to `target/jacoco.exec`, so the report also counts every earlier build since the last `clean`. Run `./mvnw clean verify` when the numbers matter. No threshold is enforced: read the report for untested branches, not for the percentage.
 
-**Time.** A full `./mvnw verify` takes about a minute on the machine this guide was written on (55 s when this section was written, 60 s with the tests of §5.9) (Docker already running, images pulled): `java-core` about 2 s, the `spring-app` unit tests about 10 s, and most of the rest goes on starting the 9 contexts and their containers. At the end of this chapter the report shows about 97 % of lines and 80 % of branches covered.
+**Time.** A full `./mvnw verify` takes about a minute on the machine this guide was written on (55 s when this section was written, 60 s with the tests of §5.9) (Docker already running, images pulled): `java-core` about 2 s, the `spring-app` unit tests about 10 s, and most of the rest goes on starting the contexts and their containers (9 then; 11 since §5.9's `BookImportIT` and §5.10). At the end of this chapter the report shows about 97 % of lines and 80 % of branches covered.
 
 **Where it is in the code:** `spring-app/src/test/java/dev/playground/library/` (`testing/TestDataFactory`, `TestTables`, `TestUsers`, `TestcontainersConfiguration`, `ApiSmokeIT`), `spring-app/src/test/resources/sql/`, the JaCoCo plugin in `spring-app/pom.xml`.
 
@@ -2237,7 +2240,142 @@ Why not expose everything? `env` and `configprops` list every configuration key;
 
 ### 5.10 Kafka
 
-_Written in Phase 14 (optional)._
+**What it is.** [Apache Kafka](https://kafka.apache.org) is a message broker built as a distributed, append-only **log**. Producers append records to a topic; consumers read them at their own pace and remember how far they got. A record is not removed when it is read: it stays for the topic's retention time (7 days by default), so a new consumer can read the history, and one that was down catches up. Spring for Apache Kafka (`spring-kafka`) wraps the Java client in Spring's style: a `KafkaTemplate` to send, `@KafkaListener` methods to receive, and the configuration under `spring.kafka.*`.
+
+**In this project.**
+- Every borrow publishes its `LoanCreatedEvent` in-process (§5.9). `messaging/LoanEventPublisher` listens to it after the commit and sends a `LoanMessage` to the `library.loans` topic, keyed by the book id.
+- `messaging/LoanStatsConsumer` reads that topic (consumer group `library-stats`) and counts the loans of each book.
+- `GET /api/stats/loans` (librarians) returns the counts, most borrowed first.
+- It is all switched on by `library.kafka.enabled`: `false` by default, so the tests and runs without a broker never try to reach one, and `true` in the dev profile. Off, none of the `messaging` beans exist and the stats URL is a 404.
+- `compose.yaml` runs one Kafka broker next to PostgreSQL (`apache/kafka`, KRaft mode; the tests use the faster-starting `apache/kafka-native` build), on `localhost:9092`.
+
+Try it with `spring-app/http/14-kafka.http`: borrow, then read the counts.
+
+```
+LoanService.borrow ──(LoanCreatedEvent, in-process)──▶ LoanEventPublisher ──send──▶ topic library.loans
+                                                                                       │ partitions 0,1,2
+                         GET /api/stats/loans ◀── LoanStatsConsumer ◀──poll (group library-stats)
+```
+
+#### When to use it
+
+| | In-process events (§5.9) | A queue (RabbitMQ, Azure Service Bus, SQS) | Kafka |
+|---|---|---|---|
+| Who receives | Beans in the same application | One consumer per message (competing consumers) | Every consumer group gets every message; within a group, each partition goes to one consumer |
+| After it is read | Gone | Deleted once acknowledged | Kept for the retention time; can be read again |
+| Survives a restart | No | Yes | Yes |
+| Order | Call order | Per queue, until there are several consumers | Per partition only |
+| Typical use | Decoupling inside one service | Commands and work to do ("send this email") | Facts that several services react to, event streams, replaying history |
+
+Start with in-process events. Reach for a broker when another application must react, or when the reaction must survive a restart.
+
+#### The concepts
+
+| Term | Meaning |
+|---|---|
+| **Broker** | A Kafka server. A cluster has several; this project runs one. Since Kafka 4.0 the cluster coordinates itself (**KRaft**); ZooKeeper is gone |
+| **Topic** | A named log, such as `library.loans` |
+| **Partition** | A topic is split into partitions, each an ordered log of its own on some broker. They are the unit of parallelism: a consumer group reads one partition with one consumer at most |
+| **Offset** | A record's position in its partition: 0, 1, 2… |
+| **Key** | Optional. Records with the same key go to the same partition (the key is hashed), so they stay in order. No key: spread across partitions, no order |
+| **Consumer group** | Consumers sharing a `group.id` split the partitions between them. Kafka stores the group's **committed offset** per partition: where it resumes after a restart. Two groups read the same topic independently |
+| **Rebalance** | When a consumer joins or leaves a group, the partitions are handed out again |
+| **Replication factor** | How many brokers keep a copy of each partition (3 in production, 1 here) |
+
+The topic is declared as a bean, and Boot's `KafkaAdmin` creates it at startup if it is missing:
+
+```java
+@Bean
+NewTopic loansTopic() {
+    return TopicBuilder.name("library.loans").partitions(3).replicas(1).build();
+}
+```
+
+The key is the book id, so the loans of one book stay in order. Three partitions let up to three instances of the application share the reading. The number of partitions is hard to change later (adding some moves keys to other partitions), so it is chosen up front.
+
+#### Producing
+
+```java
+@TransactionalEventListener   // after the borrow commits
+public void onLoanCreated(LoanCreatedEvent event) {
+    var message = new LoanMessage(event.loanId(), event.bookId(), event.memberId(), event.dueDate());
+    kafka.send("library.loans", event.bookId().toString(), message)    // topic, key, value
+            .whenComplete((result, ex) -> { if (ex != null) log.error(...); });
+}
+```
+
+- `send` does not wait for the broker. The record goes into a buffer, a background thread sends batches, and the returned `CompletableFuture` completes when the broker has it, or fails. Calling `.get()` on it would make every borrow wait for Kafka. It can still block in two cases: see `max.block.ms` below.
+- `acks=all` (the default since Kafka 3.0): the broker answers once every in-sync replica has the record. With the **idempotent producer** (also the default) a retry after a lost answer does not write the record twice.
+- If the broker cannot be reached (no metadata for the topic yet) or the buffer is full, `send` blocks the calling thread up to `max.block.ms` (60 s by default). Here it runs on the request thread right after the borrow commits, so `application.yml` lowers it to 5 s.
+- `KafkaTemplate` is created by Boot. Its serializers come from `spring.kafka.producer.*`.
+
+#### Consuming
+
+```java
+@KafkaListener(topics = "library.loans", groupId = "library-stats")
+public void onLoan(LoanMessage message) {
+    if (countedLoans.add(message.loanId())) {         // seen before? (at-least-once, below)
+        loansPerBook.merge(message.bookId(), 1L, Long::sum);
+    }
+}
+```
+
+Boot builds a **listener container** for each `@KafkaListener`: a thread that polls the broker, deserializes the records and calls the method once per record. When the method returns, the container commits the offsets (by default after each batch of records a poll returned). When it throws, the container's error handler takes over: `DefaultErrorHandler` tries the record again, 10 attempts in all, then logs it and moves on. Production code usually adds a `DeadLetterPublishingRecoverer`, which sends the failed record to a `library.loans-dlt` topic instead of only logging it.
+
+A listener method can also take the whole `ConsumerRecord<String, LoanMessage>` (key, partition, offset, headers), or `@Header` parameters.
+
+#### Serialization
+
+Kafka stores bytes; the application chooses the format. This project sends JSON, configured in `application.yml`:
+
+```yaml
+spring.kafka:
+  producer:
+    value-serializer: org.springframework.kafka.support.serializer.JacksonJsonSerializer
+    properties:
+      "[spring.json.add.type.headers]": false   # no Java class name in a header
+  consumer:
+    auto-offset-reset: earliest                  # a new group starts from the oldest record
+    value-deserializer: org.springframework.kafka.support.serializer.ErrorHandlingDeserializer
+    properties:
+      "[spring.deserializer.value.delegate.class]": org.springframework.kafka.support.serializer.JacksonJsonDeserializer
+      "[spring.json.value.default.type]": dev.playground.library.messaging.LoanMessage
+```
+
+Three decisions in there:
+- **No type header.** By default the JSON serializer adds a `__TypeId__` header with the Java class name, and the deserializer creates that class. That ties every consumer to the producer's package names. Here the message is plain JSON and the consumer says what to read it as. `LoanMessage` is a contract: add fields, never rename them.
+- **`ErrorHandlingDeserializer`.** A record that is not valid JSON fails in the deserializer, before your method, on every poll: the consumer is stuck on it forever (a **poison pill**). Wrapped, the failure reaches the error handler, which logs the record and skips it. Deserialization errors are not retried, since they would fail the same way.
+- **`auto-offset-reset: earliest`.** A group with no committed offset (a new one) starts at the oldest record still on the topic. The default, `latest`, would skip everything sent before the consumer first started.
+
+Larger systems describe messages with Avro or Protobuf and a schema registry, which checks that a new version of a message stays compatible with the old one.
+
+#### At least once
+
+| Guarantee | How you get it | Risk |
+|---|---|---|
+| At most once | Commit the offset, then process | A crash in between loses the message |
+| **At least once** | Process, then commit (Spring's default) | A crash in between delivers the message again |
+| Exactly once | Kafka transactions, when the consumer only writes back to Kafka | Does not cover your database or an email |
+
+So the consumer must be **idempotent**: processing the same message twice has the same effect as once. `LoanStatsConsumer` remembers the loan ids it has counted, and changes the ids and the counts together under one lock (`synchronized`), since request threads read what the listener thread writes. It keeps them in memory to stay small, and a restart empties the counts while the group's offsets say the old messages were read. A real consumer would keep both in its own database, the loan id under a unique constraint.
+
+#### The outbox pattern
+
+`LoanEventPublisher` sends after the commit. If the application stops between the commit and the send, or the broker is down for longer than the producer's timeouts, the loan is in the database and never reaches the topic. Sending inside the transaction is worse: the message goes out, then the transaction may still roll back.
+
+The **outbox pattern** closes the gap: in the same transaction as the loan, insert a row into an `outbox` table. A separate process reads that table and sends the rows to Kafka, deleting or marking each one once Kafka has it. The database transaction makes "loan saved" and "message to send" one atomic step. The relay can be a scheduled job (§5.9) or a change-data-capture tool such as Debezium, which reads the database's log. Spring Modulith offers it ready-made (event publication registry plus externalization). The relay can send a row twice, so consumers stay idempotent.
+
+#### Testing
+
+`LoanKafkaIT` runs against a real broker: `KafkaTestcontainersConfiguration` starts a `KafkaContainer`, and `@ServiceConnection` sets the bootstrap servers, just as for PostgreSQL. It has its own Spring context (`library.kafka.enabled=true`, two containers).
+
+- Every check waits with Awaitility: the record goes to the broker and back on other threads.
+- Proving that something did **not** happen (a rolled-back loan, a duplicate counted twice) uses the ordering guarantee: the test sends one more message with the same key and waits until the consumer has read that one (`LoanStatsConsumer.hasCounted(loanId)`). Same key, same partition, read in order, so by then everything before it has been read too, and the count is checked once, exactly. Waiting for "the count reaches 2" instead would pass for a broken consumer that counted a duplicate before the last message arrived.
+- `aMessageThatIsNotJsonIsSkippedAndTheNextOneIsRead` writes `not json` to the topic with a plain string producer, then a valid loan. Without the `ErrorHandlingDeserializer`, the consumer would never get past the first one.
+
+`spring-kafka-test` also has `@EmbeddedKafka`, a broker inside the test JVM: no Docker, but not the same broker as production.
+
+**Tests in this chapter:** `LoanEventPublisherTest` (topic, key and message; a failed send is logged), `LoanStatsConsumerTest` (counts, duplicates, ranking), `LoanKafkaIT` (the whole path through a real broker, rollback, redelivery, poison pill, stats endpoint security).
 
 ---
 
@@ -2563,14 +2701,14 @@ java -jar spring-app/target/spring-app-0.0.1-SNAPSHOT.jar --spring.profiles.acti
 ```
 
 - `package` builds `spring-app-0.0.1-SNAPSHOT.jar` (about 67 MB): the *fat jar*, with your classes in `BOOT-INF/classes`, every dependency in `BOOT-INF/lib` (Tomcat included) and Spring Boot's launcher at the root. `.jar.original` next to it is the plain jar before Boot repackaged it.
-- **The jar does not start PostgreSQL.** `spring-boot-docker-compose` is left out of the packaged jar on purpose (it is a development tool), so you start the database yourself and pass the connection: here as `--key=value` arguments. In production they would be environment variables (`SPRING_DATASOURCE_URL`…) and the JWT secret would come from `LIBRARY_SECURITY_JWT_SECRET`, not from the dev profile.
+- **The jar does not start PostgreSQL or Kafka.** `spring-boot-docker-compose` is left out of the packaged jar on purpose (it is a development tool), so you start the containers yourself (`up -d` starts both) and pass the database connection: here as `--key=value` arguments. The dev profile already points Kafka at `localhost:9092`; without a broker, add `--library.kafka.enabled=false` (§5.10). In production they would be environment variables (`SPRING_DATASOURCE_URL`…) and the JWT secret would come from `LIBRARY_SECURITY_JWT_SECRET`, not from the dev profile.
 - Test-scope dependencies are not in it: no JUnit, no Lombok, no MapStruct (`jar tf` lists the contents).
 
 Two concepts you will meet around the jar:
 - **Layered jars.** `BOOT-INF/layers.idx` splits the jar into layers (dependencies, the Spring Boot loader, snapshot dependencies, your classes). `java -Djarmode=tools -jar app.jar extract --layers` unpacks them, so a Dockerfile copies each one separately: a code change rebuilds only the small last layer of the image.
 - **Buildpacks.** `./mvnw -pl spring-app spring-boot:build-image` builds a container image with no Dockerfile (Paketo buildpacks pick the JDK and the layers). It needs Docker.
 
-**Try it.** Run the commands above, then `curl http://localhost:8080/api/info` and `curl http://localhost:8080/actuator/info`. Stop the app with `Ctrl+C` and the database with `docker compose -f spring-app/compose.yaml down`.
+**Try it.** Run the commands above, then `curl http://localhost:8080/api/info` and `curl http://localhost:8080/actuator/info`. Stop the app with `Ctrl+C` and the containers with `docker compose -f spring-app/compose.yaml down`.
 
 **Tests in this chapter:** `Java8StyleTest` (java-core), `LombokContrastTest` and `MapStructContrastTest` (spring-app). All are unit tests: no Spring context, no Docker.
 
@@ -2798,6 +2936,17 @@ A map for orientation, not a claim that the pieces are identical, grouped by top
 | Health checks (`AddHealthChecks`, `MapHealthChecks`) | Actuator `/actuator/health` | |
 | `System.Diagnostics.Metrics`, OpenTelemetry | Micrometer, `/actuator/metrics` | |
 
+### Messaging (Kafka)
+
+| .NET | Java / Spring | Notes |
+|---|---|---|
+| Confluent.Kafka `IProducer<TKey, TValue>.ProduceAsync` | `KafkaTemplate.send` | Both return at once; the task / future completes when the broker has the record |
+| A `BackgroundService` looping on `IConsumer.Consume` | `@KafkaListener` | Spring writes the poll loop, the offset commits and the error handling (§5.10) |
+| MassTransit (Kafka rider), NServiceBus | Spring for Apache Kafka; Spring Cloud Stream for a broker-neutral API | |
+| MassTransit's transactional outbox | An outbox table and a relay, or Spring Modulith's event externalization | §5.10 |
+| `ISerializer<T>` / `IDeserializer<T>`, Confluent's JSON serdes | `JacksonJsonSerializer`, `ErrorHandlingDeserializer` + `JacksonJsonDeserializer` | |
+| Testcontainers.Kafka | `testcontainers-kafka` + `@ServiceConnection` | |
+
 ### Legacy, packaging and ecosystem
 
 | .NET | Java / Spring | Notes |
@@ -2835,6 +2984,8 @@ A map for orientation, not a claim that the pieces are identical, grouped by top
 - **Validation is opt-in per parameter.** `[ApiController]` validates every bound model and answers 400 by itself. In Spring, a `@RequestBody` without `@Valid` is never validated, whatever constraints its record carries.
 - **Validation messages follow the locale.** Spring hands Hibernate Validator the request's `Accept-Language`, or else the machine's locale, and the built-in messages are translated to it. On a Spanish Windows machine you get `"no debe estar vacío"` unless the locale is pinned (§5.3).
 - **A missing `int` in the JSON is a 400.** System.Text.Json leaves a missing value-type property at its default (`0`). Jackson 3 rejects a missing or `null` primitive. Use `Integer` for optional numbers.
+- **Kafka is not a queue.** A record stays on the topic after it is read, every consumer group gets all of them, and order holds only within a partition: give related records the same key (§5.10).
+- **A message can arrive twice.** Kafka consumers are at-least-once by default; make them idempotent. And a record your deserializer cannot read blocks the consumer for good unless it is wrapped in an `ErrorHandlingDeserializer` (§5.10).
 - **There is no `SaveChanges()`.** Changes to a managed entity are written when the transaction commits. Without `@Transactional` on the service method there is no transaction to commit, and the change is lost without an error (§5.4).
 - **Hibernate may write before you expect.** Before a query, it flushes pending changes to the tables that query reads (auto flush). EF only writes on `SaveChanges()`. Run your checks before you change the entity (§5.4).
 - **Entity `equals`/`hashCode`.** EF tracks entities by reference and rarely cares. JPA code relies on them wherever entities sit in sets and collections (the relations of §5.5), and field-based ones (Lombok's `@Data`, a record) break. Compare by id, and return a constant hash code (§5.4).

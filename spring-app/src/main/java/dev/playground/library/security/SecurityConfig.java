@@ -82,7 +82,8 @@ public class SecurityConfig {
                         .hasRole("LIBRARIAN")
                         .requestMatchers("/api/members/me", "/api/members/me/**")
                         .authenticated()
-                        .requestMatchers("/api/members/**", "/api/audit-events/**")
+                        // The Kafka loan statistics (§5.10) are for librarians too.
+                        .requestMatchers("/api/members/**", "/api/audit-events/**", "/api/stats/**")
                         .hasRole("LIBRARIAN")
                         // Anything not listed needs a login, at least. (denyAll() would be stricter, but
                         // would also turn a typo in a URL into a 403 instead of a 404.)

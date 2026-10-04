@@ -8,7 +8,7 @@ concept's code updates its guide section.
 
 - `pom.xml`: the parent POM (Spring Boot parent, Java version, Spotless, Failsafe). Modules: `java-core`, `spring-app`.
 - `java-core/`: plain Java, **no Spring**. Examples are tests: `src/test/java/dev/playground/core/<topic>/<Concept>Test.java`; supporting types go in `src/main/java/dev/playground/core/<topic>/`.
-- `spring-app/`: the library API, package `dev.playground.library`, organised **by feature** (`book/`, `author/`, `loan/`, `member/`, `audit/`, `security/`, `notification/`), plus `openlibrary/` (the HTTP client for openlibrary.org), `config/` (cross-cutting beans: caching, scheduling, async…) and `common/` (errors, shared DTOs).
+- `spring-app/`: the library API, package `dev.playground.library`, organised **by feature** (`book/`, `author/`, `loan/`, `member/`, `audit/`, `security/`, `notification/`), plus `openlibrary/` (the HTTP client for openlibrary.org), `messaging/` (Kafka: loans published and counted, only when `library.kafka.enabled`), `config/` (cross-cutting beans: caching, scheduling, async…) and `common/` (errors, shared DTOs).
   - A feature holds `XController` (HTTP only), `XService` (rules and transactions), `XRepository`, the entity `X`, `XMapper` (manual static mapping) and `dto/` (records).
   - `src/main/resources/db/migration/`: Flyway migrations (`V<n>__<desc>.sql`); never edit an applied one.
   - `http/NN-topic.http`: sample requests per chapter (VS Code REST Client).
@@ -20,7 +20,7 @@ concept's code updates its guide section.
 - Errors are `ProblemDetail`. The schema changes only through Flyway (`ddl-auto: validate`).
 - Logging with SLF4J (`LoggerFactory.getLogger`), never `System.out` in `spring-app`.
 - No Lombok or MapStruct in main code. They are test-scope dependencies, used only by the labelled legacy examples (`legacy/` test packages in both modules, §6); their annotation processors are configured for `default-testCompile` only.
-- Tests: `*Test` = unit/slice with no Docker (Surefire, `./mvnw test`); `*IT` = anything that needs Docker: a full context or a `@DataJpaTest` slice on Testcontainers PostgreSQL, via `@Import(TestcontainersConfiguration.class)` (Failsafe, `./mvnw verify`). AssertJ assertions. Build test data with `testing/TestDataFactory` (entities, `withId`, `aBookRequest()`); full-context tests call `TestTables.truncateAll` first, never `@DirtiesContext`. A test class whose setup differs (another bean override, import, profile or property) adds a Spring context and a container (§5.8).
+- Tests: `*Test` = unit/slice with no Docker (Surefire, `./mvnw test`); `*IT` = anything that needs Docker: a full context or a `@DataJpaTest` slice on Testcontainers PostgreSQL, via `@Import(TestcontainersConfiguration.class)`, plus `KafkaTestcontainersConfiguration` for the Kafka ones (Failsafe, `./mvnw verify`). AssertJ assertions. Build test data with `testing/TestDataFactory` (entities, `withId`, `aBookRequest()`); full-context tests call `TestTables.truncateAll` first, never `@DirtiesContext`. A test class whose setup differs (another bean override, import, profile or property) adds a Spring context and a container (§5.8).
 - Spring Boot 4 splits starters per technology (`spring-boot-starter-webmvc`, `...-webmvc-test`, `...-flyway`…). Check start.spring.io for the exact artifact before adding one.
 
 ## Commands
@@ -35,7 +35,7 @@ concept's code updates its guide section.
 # verify also writes the JaCoCo coverage report: spring-app/target/site/jacoco/index.html
 ```
 
-- Docker Desktop must be running for `spring-boot:run` (it starts `spring-app/compose.yaml`) and for the `*IT` tests. The dev profile adds the demo data and users (`db/demo`, password `demo-password`), SQL logging and a dev-only JWT secret; without it the app needs `LIBRARY_SECURITY_JWT_SECRET`.
+- Docker Desktop must be running for `spring-boot:run` (it starts `spring-app/compose.yaml`: PostgreSQL and a Kafka broker) and for the `*IT` tests. The dev profile adds the demo data and users (`db/demo`, password `demo-password`), SQL logging, Kafka (`library.kafka.enabled`, §5.10) and a dev-only JWT secret; without it the app needs `LIBRARY_SECURITY_JWT_SECRET`.
 - Tests never call Open Library: `OpenLibraryStub` (a local HTTP server) stands in for it. Only the import requests in `http/12-beyond-crud.http` and manual runs need internet. Calls to other services go through an HTTP interface with timeouts, never inside a `@Transactional` method (§5.9).
 - Endpoints need a bearer token from `POST /api/auth/login` (§5.7). Tests: `@WithMockUser` or `TestUsers` (`jwt()`) when security is not the subject.
 - If `java` is not on PATH, set `JAVA_HOME` to the Temurin 25 install folder.

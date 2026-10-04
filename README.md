@@ -12,7 +12,7 @@ Everything is explained in **[docs/JAVA_SPRING_GUIDE.md](docs/JAVA_SPRING_GUIDE.
 | Tool | Version | Notes |
 |---|---|---|
 | JDK | 25 (Eclipse Temurin) | `winget install EclipseAdoptium.Temurin.25.JDK` (make sure `JAVA_HOME` is set, see the guide §1) |
-| Docker Desktop | any recent | Needed from the persistence chapter on (PostgreSQL, Testcontainers) |
+| Docker Desktop | any recent | Needed from the persistence chapter on (PostgreSQL, Kafka, Testcontainers) |
 | VS Code | + *Extension Pack for Java* and *Spring Boot Extension Pack* | Recommended extensions are listed in `.vscode/extensions.json` |
 
 Maven does **not** need to be installed: the Maven Wrapper (`mvnw`) downloads the right version.
@@ -30,7 +30,7 @@ The API needs a JWT signing secret. The dev profile brings a dev-only one; witho
 
 **Demo users** (dev profile only, password `demo-password` for all): `librarian@library.test` (LIBRARIAN), and `ada@library.test`, `alan@library.test`, `grace@library.test` (MEMBER). Log in with `POST /api/auth/login` and send the returned token as `Authorization: Bearer <token>`; `spring-app/http/10-security.http` shows how. These credentials exist only for local learning.
 
-With Docker Desktop running, `spring-boot:run` starts PostgreSQL by itself (`spring-app/compose.yaml`), and `verify` runs the integration tests on throwaway containers. `docker compose -f spring-app/compose.yaml down -v` deletes the local data. `verify` also writes a coverage report to `spring-app/target/site/jacoco/index.html`. With the app running, `/actuator/health` and `/actuator/info` are public; the book import (`spring-app/http/12-beyond-crud.http`) calls openlibrary.org, so it needs internet.
+With Docker Desktop running, `spring-boot:run` starts PostgreSQL and a Kafka broker by itself (`spring-app/compose.yaml`), and `verify` runs the integration tests on throwaway containers. `docker compose -f spring-app/compose.yaml down -v` deletes the local data. `verify` also writes a coverage report to `spring-app/target/site/jacoco/index.html`. With the app running, `/actuator/health` and `/actuator/info` are public; the book import (`spring-app/http/12-beyond-crud.http`) calls openlibrary.org, so it needs internet. With the dev profile every loan also goes through Kafka; `spring-app/http/14-kafka.http` shows the counts a consumer builds from them.
 
 To build the executable jar and run it with `java -jar` (the database is then started by hand), see the guide, §6 "Packaging and running the jar".
 

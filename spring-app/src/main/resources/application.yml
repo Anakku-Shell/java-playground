@@ -42,6 +42,33 @@ server:
 # their @DefaultValue defaults apply (max-active 3, duration-days 14).
 library:
   name: Playground Library
+  # The Kafka side (§5.10): publishing loans and the stats consumer. Off by default, so the tests
+  # and runs without a broker never try to reach one; the dev profile and LoanKafkaIT switch it on.
+  kafka:
+    enabled: false
+
+# Spring for Apache Kafka (§5.10). Used only when library.kafka.enabled is true; the broker address
+# defaults to localhost:9092. Keys are plain strings (the book id), values JSON.
+spring.kafka:
+  producer:
+    value-serializer: org.springframework.kafka.support.serializer.JacksonJsonSerializer
+    properties:
+      # No __TypeId__ header with our Java class name: the JSON is the contract, not the class.
+      "[spring.json.add.type.headers]": false
+      # How long send() may block the calling thread when it cannot reach the broker (default 60 s).
+      # It runs right after a borrow commits, on the request thread.
+      "[max.block.ms]": 5000
+  consumer:
+    # A new consumer group starts from the first message still on the topic, not only new ones.
+    auto-offset-reset: earliest
+    # A record that is not valid JSON would make the plain JSON deserializer fail on every poll,
+    # forever (a "poison pill"). Wrapped, the failure reaches the error handler, which logs the
+    # record and moves past it.
+    value-deserializer: org.springframework.kafka.support.serializer.ErrorHandlingDeserializer
+    properties:
+      "[spring.deserializer.value.delegate.class]": org.springframework.kafka.support.serializer.JacksonJsonDeserializer
+      # No type header (see the producer), so the consumer says what to read the JSON as.
+      "[spring.json.value.default.type]": dev.playground.library.messaging.LoanMessage
 
 # The HTTP client behind OpenLibraryApi (one "group" of HTTP interfaces, OpenLibraryConfig). Two
 # timeouts: connect, to reach the server at all; read, to wait for an answer once connected.
@@ -68,3 +95,9 @@ management:
     # The Java version in /actuator/info, next to the build (build-info.properties).
     java:
       enabled: true
+
+logging:
+  level:
+    # The Kafka client prints its whole configuration at INFO each time it creates a producer or a
+    # consumer: dozens of lines. Warnings and errors still show.
+    org.apache.kafka: WARN

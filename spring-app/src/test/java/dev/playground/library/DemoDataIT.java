@@ -25,7 +25,8 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  * The dev profile's sample data (db/demo/R__demo_data.sql) is valid SQL for the current schema, and
  * running it again adds nothing. Guide: §5.4 Persistence with JPA.
  */
-@SpringBootTest
+// The dev profile also switches Kafka on (§5.10); this test is about the data, so no broker.
+@SpringBootTest(properties = "library.kafka.enabled=false")
 @ActiveProfiles("dev")
 @Import(TestcontainersConfiguration.class)
 class DemoDataIT {

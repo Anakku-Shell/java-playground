@@ -91,6 +91,13 @@
             <artifactId>spring-boot-starter-actuator</artifactId>
         </dependency>
 
+        <!-- Spring for Apache Kafka: KafkaTemplate to publish, @KafkaListener to consume (§5.10). The
+             application uses it only when library.kafka.enabled is true (the dev profile). -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-kafka</artifactId>
+        </dependency>
+
         <!-- The JDBC driver: only needed at runtime, the code never imports it. -->
         <dependency>
             <groupId>org.postgresql</groupId>
@@ -164,7 +171,15 @@
             <scope>test</scope>
         </dependency>
 
-        <!-- Throwaway PostgreSQL containers for the *IT tests; @ServiceConnection wires them in. -->
+        <!-- The test starter paired with the Kafka starter (start.spring.io adds it). -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-kafka-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- Throwaway PostgreSQL (and, for LoanKafkaIT, Kafka) containers for the *IT tests;
+             @ServiceConnection wires them in. -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-testcontainers</artifactId>
@@ -178,6 +193,11 @@
         <dependency>
             <groupId>org.testcontainers</groupId>
             <artifactId>testcontainers-postgresql</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers-kafka</artifactId>
             <scope>test</scope>
         </dependency>
 

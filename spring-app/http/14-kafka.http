@@ -1,0 +1,71 @@
+### Guide §5.10 Kafka. VS Code REST Client syntax: click "Send Request" above each request.
+### Start the app with the dev profile: it switches Kafka on (library.kafka.enabled), and compose.yaml
+### starts the broker next to PostgreSQL:
+###   ./mvnw -pl spring-app spring-boot:run -Dspring-boot.run.profiles=dev
+### Ids and statuses assume the demo data on an empty database, and a first run of this file: reset
+### with docker compose -f spring-app/compose.yaml down -v
+### The demo loans are inserted by SQL, not borrowed, so they never went through Kafka: the stats
+### start empty. They also start empty after every restart (the consumer counts in memory).
+
+@host = http://localhost:8080
+
+# @name login
+POST {{host}}/api/auth/login
+Content-Type: application/json
+
+{"email": "librarian@library.test", "password": "demo-password"}
+
+### The stats before any borrow (200, [])
+GET {{host}}/api/stats/loans
+Authorization: Bearer {{login.response.body.accessToken}}
+
+### Alan borrows Pride and Prejudice (201). After the commit, LoanEventPublisher sends it to the
+### library.loans topic with key "5" (the book id)
+POST {{host}}/api/loans
+Authorization: Bearer {{login.response.body.accessToken}}
+Content-Type: application/json
+
+{"bookId": 5, "memberId": 2}
+
+### Grace borrows it too (201): same key, same partition, so the two stay in order
+POST {{host}}/api/loans
+Authorization: Bearer {{login.response.body.accessToken}}
+Content-Type: application/json
+
+{"bookId": 5, "memberId": 3}
+
+### Grace borrows Cosmos (201): another key, maybe another partition
+POST {{host}}/api/loans
+Authorization: Bearer {{login.response.body.accessToken}}
+Content-Type: application/json
+
+{"bookId": 8, "memberId": 3}
+
+### Ada asks for The Dispossessed, whose only copy Alan has (409). The borrow is refused before any
+### event is raised, so nothing is published. (A loan whose transaction rolls back after the event is
+### never published either: LoanKafkaIT.aRolledBackLoanIsNeverPublished)
+POST {{host}}/api/loans
+Authorization: Bearer {{login.response.body.accessToken}}
+Content-Type: application/json
+
+{"bookId": 4, "memberId": 1}
+
+### What the consumer has counted (200): [{"bookId":5,"loans":2},{"bookId":8,"loans":1}]. The
+### consumer runs on its own thread: a request sent right after a borrow may come a moment too soon
+GET {{host}}/api/stats/loans
+Authorization: Bearer {{login.response.body.accessToken}}
+
+### Log in as Ada, a member (200)
+# @name ada
+POST {{host}}/api/auth/login
+Content-Type: application/json
+
+{"email": "ada@library.test", "password": "demo-password"}
+
+### The stats are for librarians (403)
+GET {{host}}/api/stats/loans
+Authorization: Bearer {{ada.response.body.accessToken}}
+
+### To look inside the broker, print the topic's messages (key, then JSON value) with the Kafka tools in
+### the container. A shell command, not an HTTP request; it stops after 10 s without a new message:
+###   docker compose -f spring-app/compose.yaml exec kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic library.loans --from-beginning --formatter-property print.key=true --timeout-ms 10000

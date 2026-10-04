@@ -3,6 +3,9 @@
 # Guide: §5.1 Spring Boot fundamentals.
 library:
   name: Playground Library (dev)
+  # Publish loans to Kafka and count them (§5.10). The broker is the kafka service of compose.yaml.
+  kafka:
+    enabled: true
 
 spring:
   # db/demo holds a repeatable migration with sample data. It is on the Flyway path only here, so
@@ -13,6 +16,10 @@ spring:
     properties:
       hibernate:
         format_sql: true
+  # Boot's Docker Compose support has no Kafka connection details (it has them for Testcontainers),
+  # so the address is written here: the port compose.yaml publishes. (It is also the default.)
+  kafka:
+    bootstrap-servers: localhost:9092
 
 logging:
   level:
