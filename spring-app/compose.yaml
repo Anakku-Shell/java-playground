@@ -1,0 +1,31 @@
+# The development services. Spring Boot's Docker Compose support (spring-boot-docker-compose)
+# runs `docker compose up` on spring-boot:run, reads this file and builds the DataSource from it:
+# no URL, user or password in application.yml. Tests do not use it (they use Testcontainers).
+# The image creates the `library` database from POSTGRES_DB on first start.
+# Reset all data: docker compose -f spring-app/compose.yaml down -v
+# Guide: §5.4 Persistence with JPA, §5.10 Kafka.
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: library
+      POSTGRES_USER: library
+      POSTGRES_PASSWORD: library
+    ports:
+      - "5432:5432"
+    volumes:
+      # A named volume, so the data survives `docker compose down` (but not `down -v`).
+      - library-data:/var/lib/postgresql/data
+
+  # A single Kafka broker in KRaft mode (no ZooKeeper), with the image's default configuration: it
+  # listens on 9092 and tells clients to connect to localhost:9092. This image ships Kafka's command
+  # line tools in /opt/kafka/bin (http/14-kafka.http uses one to read the topic); the tests use the
+  # smaller apache/kafka-native, which starts faster but has none. No volume: the topics and their
+  # messages are gone after `docker compose down`. Used by the dev profile (library.kafka.enabled).
+  kafka:
+    image: apache/kafka:4.3.1
+    ports:
+      - "9092:9092"
+
+volumes:
+  library-data:

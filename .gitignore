@@ -1,0 +1,25 @@
+# Build output (Maven)
+target/
+*.class
+*.log
+
+# IDEs
+.idea/
+*.iml
+.classpath
+.project
+.settings/
+.factorypath
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/launch.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local working files (not part of the repo)
+PLAN.md
+docs/superpowers/
+.superpowers/

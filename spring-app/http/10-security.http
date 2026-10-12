@@ -1,0 +1,126 @@
+### Guide §5.7 Security. VS Code REST Client syntax: click "Send Request" above each request.
+### Start the app with the dev profile (demo users, all with the password "demo-password"):
+###   ./mvnw -pl spring-app spring-boot:run -Dspring-boot.run.profiles=dev
+### Ids and statuses assume the demo data on an empty database, and a first run of this file: reset
+### with docker compose -f spring-app/compose.yaml down -v
+### Demo ids: members Ada 1, Alan 2, Grace 3, the librarian 4; loan 3 is Alan's copy of The Dispossessed.
+### "# @name x" names a request; {{x.response.body.accessToken}} reuses its token.
+
+@host = http://localhost:8080
+
+### No token (401): a ProblemDetail, and "WWW-Authenticate: Bearer" says how to authenticate
+GET {{host}}/api/books
+
+### The API itself is public (200)
+GET {{host}}/api/info
+
+### Log in as the librarian (200): {"accessToken": "eyJ...", "tokenType": "Bearer", "expiresIn": 3600}.
+### Paste the accessToken into https://jwt.io to read its claims: signed, not encrypted
+# @name librarian
+POST {{host}}/api/auth/login
+Content-Type: application/json
+
+{"email": "librarian@library.test", "password": "demo-password"}
+
+### A librarian changes the catalogue (201)
+POST {{host}}/api/books
+Authorization: Bearer {{librarian.response.body.accessToken}}
+Content-Type: application/json
+
+{"isbn": "9780547928227", "title": "The Hobbit", "publishedYear": 1937, "totalCopies": 1}
+
+### Log in as Ada, a member (200). The email is case-insensitive
+# @name ada
+POST {{host}}/api/auth/login
+Content-Type: application/json
+
+{"email": "Ada@Library.test", "password": "demo-password"}
+
+### Who am I (200: Ada, role MEMBER). The token's subject is the member id
+GET {{host}}/api/members/me
+Authorization: Bearer {{ada.response.body.accessToken}}
+
+### Ada borrows Cosmos for herself (201, memberId 1): no memberId in the body, it comes from the token
+# @name loan
+POST {{host}}/api/loans
+Authorization: Bearer {{ada.response.body.accessToken}}
+Content-Type: application/json
+
+{"bookId": 8}
+
+### Ada's own loans (200: Dune and Cosmos, and the returned Emma)
+GET {{host}}/api/members/me/loans
+Authorization: Bearer {{ada.response.body.accessToken}}
+
+### Ada returns her loan (200): she owns it
+POST {{host}}/api/loans/{{loan.response.body.id}}/return
+Authorization: Bearer {{ada.response.body.accessToken}}
+
+### A member cannot change the catalogue (403, a URL rule)
+DELETE {{host}}/api/books/1
+Authorization: Bearer {{ada.response.body.accessToken}}
+
+### ...nor list everyone's loans (403, a URL rule)
+GET {{host}}/api/loans
+Authorization: Bearer {{ada.response.body.accessToken}}
+
+### ...nor read Alan's loan (403, @PreAuthorize on LoanService.findById)
+GET {{host}}/api/loans/3
+Authorization: Bearer {{ada.response.body.accessToken}}
+
+### ...nor borrow in Alan's name (403)
+POST {{host}}/api/loans
+Authorization: Bearer {{ada.response.body.accessToken}}
+Content-Type: application/json
+
+{"bookId": 8, "memberId": 2}
+
+### A librarian may borrow on a member's behalf (201, memberId 2)
+POST {{host}}/api/loans
+Authorization: Bearer {{librarian.response.body.accessToken}}
+Content-Type: application/json
+
+{"bookId": 8, "memberId": 2}
+
+### The audit trail is for librarians: Ada gets a 403...
+GET {{host}}/api/audit-events
+Authorization: Bearer {{ada.response.body.accessToken}}
+
+### ...the librarian a 200
+GET {{host}}/api/audit-events
+Authorization: Bearer {{librarian.response.body.accessToken}}
+
+### A token with one character added to its signature (401, error="invalid_token")
+GET {{host}}/api/members/me
+Authorization: Bearer {{ada.response.body.accessToken}}x
+
+### A wrong password (401, "Invalid email or password."): the same answer as for an unknown email
+POST {{host}}/api/auth/login
+Content-Type: application/json
+
+{"email": "ada@library.test", "password": "not-the-password"}
+
+### Register a new member (201, role MEMBER, Location /api/members/5). The console shows the insert
+### with the password as a {bcrypt} hash
+POST {{host}}/api/auth/register
+Content-Type: application/json
+
+{"email": "katherine@library.test", "fullName": "Katherine Johnson", "password": "orbital-mechanics"}
+
+### A password below 8 characters (400, errors.password)
+POST {{host}}/api/auth/register
+Content-Type: application/json
+
+{"email": "dorothy@library.test", "fullName": "Dorothy Vaughan", "password": "fortran"}
+
+### A CORS preflight from the Angular dev server (200, Access-Control-Allow-Origin: http://localhost:4200).
+### A browser sends it by itself before a cross-origin POST with a JSON body
+OPTIONS {{host}}/api/books
+Origin: http://localhost:4200
+Access-Control-Request-Method: POST
+Access-Control-Request-Headers: authorization, content-type
+
+### The same preflight from another origin (403, "Invalid CORS request")
+OPTIONS {{host}}/api/books
+Origin: https://evil.example
+Access-Control-Request-Method: POST

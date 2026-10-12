@@ -1,0 +1,103 @@
+# Main configuration. Profile-specific files (application-dev.yml...) override these values.
+# Guide: §5.1 Spring Boot fundamentals.
+spring:
+  application:
+    name: library
+  # One language for every message. Without this, Spring passes the request's locale
+  # (Accept-Language, else the JVM's) to Hibernate Validator, which translates its built-in messages,
+  # while our custom ones exist only in English. Guide: §5.3.
+  web:
+    locale: en
+    locale-resolver: fixed
+  # No datasource URL here: on spring-boot:run it comes from compose.yaml (Docker Compose support),
+  # in tests from the Testcontainers container (@ServiceConnection). Guide: §5.4.
+  jpa:
+    hibernate:
+      # Flyway owns the schema. Hibernate only checks at startup that every entity matches a table
+      # and its columns, and fails fast if not. Never create/update outside a throwaway prototype.
+      ddl-auto: validate
+    # On by default: keeps the persistence context open for the whole web request, so lazy loading
+    # "works" in controllers while firing hidden queries there. Off, and data is loaded in the
+    # service layer on purpose (§5.5 shows the LazyInitializationException this exposes).
+    open-in-view: false
+  # Only these caches exist: a @Cacheable naming another one fails instead of quietly creating it.
+  # Guide: §5.9 Beyond CRUD.
+  cache:
+    cache-names: open-library
+  data:
+    web:
+      pageable:
+        # ?size=500 is clamped to 100 (not an error): one request cannot ask for the whole table.
+        max-page-size: 100
+  flyway:
+    # After a dev run, flyway_schema_history lists R__demo_data, which other profiles cannot see
+    # (db/demo is only on the dev path). Flyway would refuse to start ("applied migration not
+    # resolved locally"). Ignore a missing repeatable; keep the default for future versions.
+    ignore-migration-patterns: "*:future,repeatable:missing"
+
+server:
+  port: 8080
+
+# Bound to dev.playground.library.config.LibraryProperties. The loan rules are not set here, so
+# their @DefaultValue defaults apply (max-active 3, duration-days 14).
+library:
+  name: Playground Library
+  # The Kafka side (§5.10): publishing loans and the stats consumer. Off by default, so the tests
+  # and runs without a broker never try to reach one; the dev profile and LoanKafkaIT switch it on.
+  kafka:
+    enabled: false
+
+# Spring for Apache Kafka (§5.10). Used only when library.kafka.enabled is true; the broker address
+# defaults to localhost:9092. Keys are plain strings (the book id), values JSON.
+spring.kafka:
+  producer:
+    value-serializer: org.springframework.kafka.support.serializer.JacksonJsonSerializer
+    properties:
+      # No __TypeId__ header with our Java class name: the JSON is the contract, not the class.
+      "[spring.json.add.type.headers]": false
+      # How long send() may block the calling thread when it cannot reach the broker (default 60 s).
+      # It runs right after a borrow commits, on the request thread.
+      "[max.block.ms]": 5000
+  consumer:
+    # A new consumer group starts from the first message still on the topic, not only new ones.
+    auto-offset-reset: earliest
+    # A record that is not valid JSON would make the plain JSON deserializer fail on every poll,
+    # forever (a "poison pill"). Wrapped, the failure reaches the error handler, which logs the
+    # record and moves past it.
+    value-deserializer: org.springframework.kafka.support.serializer.ErrorHandlingDeserializer
+    properties:
+      "[spring.deserializer.value.delegate.class]": org.springframework.kafka.support.serializer.JacksonJsonDeserializer
+      # No type header (see the producer), so the consumer says what to read the JSON as.
+      "[spring.json.value.default.type]": dev.playground.library.messaging.LoanMessage
+
+# The HTTP client behind OpenLibraryApi (one "group" of HTTP interfaces, OpenLibraryConfig). Two
+# timeouts: connect, to reach the server at all; read, to wait for an answer once connected.
+# Without them a request waits for as long as the server takes. Guide: §5.9 Beyond CRUD.
+spring.http.serviceclient.openlibrary:
+  base-url: https://openlibrary.org
+  connect-timeout: 2s
+  read-timeout: 5s
+
+# Actuator (§5.9): production endpoints under /actuator. Only these three go over HTTP; the rest
+# (env, beans, heapdump...) can reveal configuration or memory, so they stay off. Who may read them
+# is in SecurityConfig: health and info for anyone, metrics for librarians.
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      # Anyone gets UP or DOWN; a librarian also sees each check (database, disk space...).
+      show-details: when-authorized
+      roles: LIBRARIAN
+  info:
+    # The Java version in /actuator/info, next to the build (build-info.properties).
+    java:
+      enabled: true
+
+logging:
+  level:
+    # The Kafka client prints its whole configuration at INFO each time it creates a producer or a
+    # consumer: dozens of lines. Warnings and errors still show.
+    org.apache.kafka: WARN
