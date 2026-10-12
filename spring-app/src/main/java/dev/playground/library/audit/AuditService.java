@@ -15,9 +15,9 @@ import org.springframework.transaction.annotation.Transactional;
  *
  * <p>Two choices a real system would weigh. It fails closed: if recording fails (database down,
  * pool timeout), the exception reaches the caller and its request fails too, so nothing happens
- * unaudited. And every audited request holds two connections for a moment (its own and this one):
- * fine at this scale; under load, write the event after the commit instead (§5.9) and accept that
- * a crash in between loses it. Guide: §5.6 Transactions.
+ * unaudited. And it is called before the caller's own transaction starts ({@code LoanService}): a
+ * caller that held its connection while this method took a second one could empty the pool (the
+ * pool trap, §5.6). Guide: §5.6 Transactions.
  */
 @Service
 @Transactional(readOnly = true)
@@ -32,11 +32,14 @@ public class AuditService {
     }
 
     /**
-     * {@code REQUIRES_NEW}: the caller's transaction is suspended, this method runs in a new one on a
-     * second database connection, and that one commits when the method returns. What the caller
-     * does next, commit or roll back, no longer touches the event. The default ({@code REQUIRED})
-     * would join the caller's transaction instead. The call goes through the Spring proxy because
-     * it comes from another bean: a call from inside this class would not (self-invocation, §5.6).
+     * {@code REQUIRES_NEW}: always a transaction of its own, which commits when the method returns.
+     * Called inside a caller's transaction, it suspends that one and runs on a second database
+     * connection; what the caller does next, commit or roll back, no longer touches the event. The
+     * default ({@code REQUIRED}) would join the caller's transaction instead. {@code LoanService}
+     * calls it before opening its own, so there is nothing to suspend and one connection is enough;
+     * {@code REQUIRES_NEW} keeps the event safe for a caller that forgets. The call goes through the
+     * Spring proxy because it comes from another bean: a call from inside this class would not
+     * (self-invocation, §5.6).
      */
     @Transactional(propagation = Propagation.REQUIRES_NEW)
     public void record(String action, String detail) {

@@ -69,15 +69,15 @@ public class OpenLibraryClient {
                             .toList();
             return Optional.of(new OpenLibraryBook(isbn13, edition.title(), yearIn(edition.publishDate()), authors));
         } catch (RestClientException e) {
-            // A 404 for an author lands here too: the edition names it, so it should exist.
+            // Any other failure of an author request too (a 5xx, a timeout): no answer is not "no author".
             throw new ExternalServiceException(SERVICE, e);
         }
     }
 
     /**
      * An author with a name, or empty. Open Library merges duplicate authors, and the old record then
-     * answers with a redirect record that has no name: one unusable author is left out (and logged)
-     * rather than blocking the import of the whole book.
+     * answers with a redirect record that has no name; a deleted record answers 404. Either way one
+     * unusable author is left out (and logged) rather than blocking the import of the whole book.
      */
     private Optional<OpenLibraryBook.Author> author(OpenLibraryApi.Key key) {
         if (key.key() == null || key.key().isBlank()) {
@@ -86,7 +86,13 @@ public class OpenLibraryClient {
         }
         // "/authors/OL79034A" -> "OL79034A": as a path variable the slashes would be encoded.
         String id = key.key().substring(key.key().lastIndexOf('/') + 1);
-        OpenLibraryApi.Author author = api.author(id);
+        OpenLibraryApi.Author author;
+        try {
+            author = api.author(id);
+        } catch (HttpClientErrorException.NotFound e) {
+            log.warn("Open Library author {} does not exist; left out", id);
+            return Optional.empty();
+        }
         if (author == null || author.name() == null || author.name().isBlank()) {
             log.warn("Open Library author {} has no name; left out", id);
             return Optional.empty();

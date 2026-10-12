@@ -13,7 +13,7 @@ public final class Paging {
 
     /**
      * Checks the requested sort against the properties an endpoint allows, then adds {@code id} as
-     * the last sort key.
+     * the last sort key, unless the sort already names it.
      *
      * <p>Why an allow-list: {@code ?sort=authors.name} names a real path, so Spring Data accepts it,
      * but it joins a collection. A book with two authors becomes two rows, and {@code LIMIT/OFFSET}
@@ -29,9 +29,10 @@ public final class Paging {
                 throw new InvalidSortException(order.getProperty(), new TreeSet<>(sortable));
             }
         }
-        return PageRequest.of(
-                pageable.getPageNumber(),
-                pageable.getPageSize(),
-                pageable.getSort().and(Sort.by("id")));
+        Sort sort = pageable.getSort();
+        if (sort.getOrderFor("id") == null) {
+            sort = sort.and(Sort.by("id"));
+        }
+        return PageRequest.of(pageable.getPageNumber(), pageable.getPageSize(), sort);
     }
 }

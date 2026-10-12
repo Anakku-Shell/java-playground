@@ -32,6 +32,8 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 /**
  * The loan rules, with the repositories mocked and a fixed {@code Clock}: "now" is always
@@ -57,6 +59,10 @@ class LoanServiceTest {
     @Mock
     private ApplicationEventPublisher events;
 
+    // Behind a real TransactionTemplate: the lambda runs, and getTransaction/commit do nothing.
+    @Mock
+    private PlatformTransactionManager transactionManager;
+
     private LoanService service;
 
     private Book dune;
@@ -64,13 +70,25 @@ class LoanServiceTest {
 
     @BeforeEach
     void setUp() {
-        // Built by hand: @InjectMocks only injects mocks, and the clock and settings are real values.
-        var properties = new LibraryProperties("Test library", new LibraryProperties.Loans(3, 14));
-        service = new LoanService(loans, books, members, properties, Clock.fixed(NOW, ZoneOffset.UTC), audit, events);
+        service = serviceAt(NOW);
 
         dune = withId(dune(), 1L);
         dune.setTotalCopies(2);
         ada = withId(ada(), 7L);
+    }
+
+    // Built by hand: @InjectMocks only injects mocks, and the clock and settings are real values.
+    private LoanService serviceAt(Instant now) {
+        var properties = new LibraryProperties("Test library", new LibraryProperties.Loans(3, 14));
+        return new LoanService(
+                loans,
+                books,
+                members,
+                properties,
+                Clock.fixed(now, ZoneOffset.UTC),
+                audit,
+                events,
+                new TransactionTemplate(transactionManager));
     }
 
     private void bookAndMemberExist() {
@@ -104,9 +122,7 @@ class LoanServiceTest {
         // Java's clock can tick below a microsecond; timestamptz keeps microseconds. Without the
         // truncation, the POST response and a later GET would show two different loanedAt values.
         Instant precise = Instant.parse("2026-09-30T10:00:00.123456789Z");
-        var properties = new LibraryProperties("Test library", new LibraryProperties.Loans(3, 14));
-        service =
-                new LoanService(loans, books, members, properties, Clock.fixed(precise, ZoneOffset.UTC), audit, events);
+        service = serviceAt(precise);
         bookAndMemberExist();
         given(loans.save(any(Loan.class))).willAnswer(invocation -> withId(invocation.getArgument(0), 5L));
 

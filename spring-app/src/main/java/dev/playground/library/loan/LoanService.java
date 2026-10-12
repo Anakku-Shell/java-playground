@@ -19,16 +19,19 @@ import org.springframework.data.domain.Sort;
 import org.springframework.data.jpa.domain.Specification;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 /**
  * Borrowing and returning. The rules: a copy must be available (total copies minus active loans),
  * a member holds at most {@code library.loans.max-active} loans, a loan is due
  * {@code library.loans.duration-days} after today, and a loan is returned once. Each broken rule is
  * a {@code ConflictException} (409). Reads run in the class-level read-only transaction; borrow and
- * return are read-write, and their races are closed with optimistic locking. Guide: §5.5 Advanced
- * JPA, §5.6 Transactions, §5.7 Security (who may read and return a loan), §5.9 Beyond CRUD (the
- * event a borrow publishes, the overdue loans).
+ * return audit the request first, then run in a read-write transaction of their own, and their
+ * races are closed with optimistic locking. Guide: §5.5 Advanced JPA, §5.6 Transactions, §5.7
+ * Security (who may read and return a loan), §5.9 Beyond CRUD (the event a borrow publishes, the
+ * overdue loans).
  */
 @Service
 @Transactional(readOnly = true)
@@ -41,6 +44,7 @@ public class LoanService {
     private final Clock clock;
     private final AuditService audit;
     private final ApplicationEventPublisher events;
+    private final TransactionTemplate transaction;
 
     public LoanService(
             LoanRepository loans,
@@ -49,7 +53,8 @@ public class LoanService {
             LibraryProperties properties,
             Clock clock,
             AuditService audit,
-            ApplicationEventPublisher events) {
+            ApplicationEventPublisher events,
+            TransactionTemplate transaction) {
         this.loans = loans;
         this.books = books;
         this.members = members;
@@ -57,6 +62,7 @@ public class LoanService {
         this.clock = clock;
         this.audit = audit;
         this.events = events;
+        this.transaction = transaction;
     }
 
     /**
@@ -66,12 +72,20 @@ public class LoanService {
      * member (max-active) are read with a version bump. At commit, the second of two overlapping
      * borrows finds a newer version, fails with an optimistic locking exception (409, retry) and its
      * loan is rolled back. {@code LoanConcurrencyIT} forces these races.
+     *
+     * <p>{@code NOT_SUPPORTED} switches the class's read-only transaction off for this method. The
+     * audit event is written first, in a transaction of its own (see AuditService: a rejected borrow
+     * is audited too), and only then does the borrow's transaction start. The other way round, the
+     * borrow would hold its connection while the audit waited for a second one: the pool trap of
+     * §5.6, which {@code LoanConnectionPoolIT} checks with a pool of one connection.
      */
-    @Transactional
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
     public LoanResponse borrow(Long bookId, Long memberId) {
-        // First, and in a transaction of its own (see AuditService): a rejected borrow is audited too.
-        // The cost: this transaction already holds a connection, and the audit takes a second one.
         audit.record("BORROW_REQUESTED", "book " + bookId + ", member " + memberId);
+        return transaction.execute(status -> borrowInTransaction(bookId, memberId));
+    }
+
+    private LoanResponse borrowInTransaction(Long bookId, Long memberId) {
         // Both read with a version bump: see the methods, and the races described above.
         Book book = books.findWithVersionIncrementById(bookId).orElseThrow(() -> new NotFoundException("Book", bookId));
         Member member = members.findWithVersionIncrementById(memberId)
@@ -98,12 +112,17 @@ public class LoanService {
      * the second UPDATE match no row, so it fails (409) and the first {@code returnedAt} stays.
      *
      * <p>Only the loan's member or a librarian (§5.7). The check runs before the method, and before
-     * its transaction: a refused return is not even audited.
+     * its transaction: a refused return is not even audited. Then the audit and the transaction, one
+     * after the other, as in {@code borrow}.
      */
     @PreAuthorize("hasRole('LIBRARIAN') or @loanAccess.isOwner(#id, authentication)")
-    @Transactional
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
     public LoanResponse returnLoan(Long id) {
         audit.record("RETURN_REQUESTED", "loan " + id);
+        return transaction.execute(status -> returnInTransaction(id));
+    }
+
+    private LoanResponse returnInTransaction(Long id) {
         Loan loan = getOrThrow(id);
         if (!loan.isActive()) {
             throw new ConflictException("Loan " + id + " was already returned");

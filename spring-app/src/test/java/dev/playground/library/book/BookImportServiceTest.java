@@ -175,4 +175,14 @@ class BookImportServiceTest {
 
         assertThatThrownBy(() -> service.preview("9780441013593")).isInstanceOf(NotFoundException.class);
     }
+
+    @Test
+    void aLongTitleIsCutBetweenCharactersNeverInsideOne() {
+        // An emoji is two chars in Java (a surrogate pair) but one character to PostgreSQL's
+        // varchar(n). Cut at 300 chars, this title would end in half an emoji.
+        String emoji = "\uD83D\uDE00";
+        String title = "a".repeat(299) + emoji + "b";
+
+        assertThat(BookImportService.fit(title, 300)).isEqualTo("a".repeat(299) + emoji);
+    }
 }

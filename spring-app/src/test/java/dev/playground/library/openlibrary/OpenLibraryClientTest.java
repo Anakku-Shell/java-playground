@@ -133,10 +133,21 @@ class OpenLibraryClientTest {
     }
 
     @Test
-    void anAuthorThatCannotBeReadIsAnExternalServiceFailure() {
-        // The edition exists, so its author must too: a 404 here is Open Library's problem, not
-        // "no such book".
+    void anAuthorThatNoLongerExistsIsLeftOut() {
+        // No route for the author, so the stub answers 404: what Open Library does for a deleted
+        // record. Left out like the unusable records above.
         openLibrary.json("/isbn/9780441013593.json", DUNE_EDITION);
+
+        assertThat(client.findBook("9780441013593"))
+                .map(OpenLibraryBook::authors)
+                .contains(List.of());
+    }
+
+    @Test
+    void anAuthorThatCannotBeReadIsAnExternalServiceFailure() {
+        // Not "no such author" but "no answer": importing the book without them would be wrong.
+        openLibrary.json("/isbn/9780441013593.json", DUNE_EDITION);
+        openLibrary.status("/authors/OL79034A.json", 503);
 
         assertThatThrownBy(() -> client.findBook("9780441013593")).isInstanceOf(ExternalServiceException.class);
     }

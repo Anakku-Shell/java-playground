@@ -78,7 +78,8 @@ public class BookImportService {
     /**
      * By name: Open Library's author ids are not stored here, so "Frank Herbert" in the catalogue is
      * taken to be Open Library's Frank Herbert. Good enough for a playground; a real catalogue would
-     * store the external id (a column and a migration) and match on it.
+     * store the external id (a column and a migration) and match on it. With no unique constraint on
+     * the name, two imports at once that both bring a new author can each create it.
      */
     private Author findOrCreate(OpenLibraryBook.Author author) {
         String name = fit(author.name(), NAME_MAX);
@@ -86,8 +87,15 @@ public class BookImportService {
                 .orElseGet(() -> authors.save(new Author(name, author.birthYear())));
     }
 
-    // Open Library has no length limits; our columns do. Cut rather than fail the import.
-    private static String fit(String value, int max) {
-        return value.length() <= max ? value : value.substring(0, max);
+    /**
+     * Open Library has no length limits; our columns do. Cut rather than fail the import. The limit
+     * counts characters (code points), as {@code varchar(n)} does, not Java {@code char}s: a cut by
+     * chars could split an emoji (two chars, a surrogate pair) in half. Package-private for its test.
+     */
+    static String fit(String value, int max) {
+        if (value.codePointCount(0, value.length()) <= max) {
+            return value;
+        }
+        return value.substring(0, value.offsetByCodePoints(0, max));
     }
 }

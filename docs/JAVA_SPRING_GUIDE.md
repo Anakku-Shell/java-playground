@@ -1425,7 +1425,7 @@ public PageResponse<BookResponse> list(
 - Spring builds the `Pageable` from `?page=` (**zero-based**), `?size=` (default 20) and `?sort=title,desc` (repeatable). `spring.data.web.pageable.max-page-size: 100` **clamps** `?size=500` to 100 rather than rejecting it (`BookControllerTest.aPageSizeAboveTheMaximumIsClamped`).
 - `JpaSpecificationExecutor.findAll(spec, pageable)` returns a `Page`: the content plus the total. The total costs a `select count(*)`. Spring Data skips it when the first page is shorter than the page size, because that page is the whole result. `Slice` is the variant with no count, for "load more" lists.
 - The API returns our own `PageResponse(content, page, size, totalElements, totalPages)`, not the `Page` object. Spring Data warns that `PageImpl`'s JSON is not a stable format. Its own alternative is `@EnableSpringDataWebSupport(pageSerializationMode = VIA_DTO)`.
-- **A stable order across pages.** Sort by title alone, and two books with the same title can come back in either order. Page 1 and page 2 are separate queries, so a book could appear twice or never. `Paging.sanitize` appends `id` to every sort.
+- **A stable order across pages.** Sort by title alone, and two books with the same title can come back in either order. Page 1 and page 2 are separate queries, so a book could appear twice or never. `Paging.sanitize` appends `id` to every sort that does not already name it (`PagingTest`).
 - **Only listed properties can be sorted by.** `?sort=popularity` does not exist: Spring Data would throw `PropertyReferenceException` and the catch-all would answer 500. `?sort=authors.name` is worse: it exists, so Spring Data joins `book_authors`, a book with two authors becomes two rows, and `LIMIT`/`OFFSET` counts rows, not books. The review of this phase found the same book on pages 1 and 3 and a total that changed from page to page, all with a 200. `Paging.sanitize` checks each sort against the endpoint's allow-list (`BookService.SORTABLE`) and answers 400 (`BookControllerIT.sortingThroughARelationIs400`). The `PropertyReferenceException` handler stays as a safety net.
 
 #### Specifications — filters built at runtime
@@ -1502,7 +1502,7 @@ Where the code is:
 - The [`audit/`](../spring-app/src/main/java/dev/playground/library/audit/) feature: `AuditService.record` runs in its own transaction.
 - `GlobalExceptionHandler.handleOptimisticLock` (409).
 - `@Transactional(readOnly = true)` on the class of every service.
-- Tests: [`TransactionBehaviourIT`](../spring-app/src/test/java/dev/playground/library/transactions/TransactionBehaviourIT.java) (the rules, one test each), **`LoanConcurrencyIT`** (the races), `LoanControllerIT.aRejectedBorrowIsStillAudited`.
+- Tests: [`TransactionBehaviourIT`](../spring-app/src/test/java/dev/playground/library/transactions/TransactionBehaviourIT.java) (the rules, one test each), **`LoanConcurrencyIT`** (the races), `LoanControllerIT.aRejectedBorrowIsStillAudited`, `LoanConnectionPoolIT` (the pool trap).
 
 Requests: [`http/09-transactions.http`](../spring-app/http/09-transactions.http).
 
@@ -1560,11 +1560,21 @@ public void record(String action, String detail) {
 }   // commits here, before LoanService goes on to its checks
 ```
 
-A borrow of a book with no copies left answers 409, and its transaction rolls back: no loan. The audit event committed before that and stays (`LoanControllerIT.aRejectedBorrowIsStillAudited`; with `REQUIRED` it is rolled back too and the test fails). `GET /api/audit-events` shows it.
+A borrow of a book with no copies left answers 409, and its transaction rolls back: no loan. The audit event committed before that and stays (`LoanControllerIT.aRejectedBorrowIsStillAudited`). `GET /api/audit-events` shows it.
 
-Two consequences, both deliberate here and both written down in `AuditService`:
-- **It fails closed.** If the audit insert fails, its exception reaches `borrow`, which fails and rolls back too: nothing happens unaudited.
-- **Every borrow and return holds two connections for a moment**, its own and the audit's. That is the pool trap in the gotchas below. Fine at this scale; under load, write the event after the commit instead (§5.9) and accept that a crash in between loses it.
+**Audit first, then the transaction.** Called from inside the borrow's transaction, `REQUIRES_NEW` would suspend it and take a **second connection** while the first stays held: the pool trap in the gotchas below. So `borrow` and `returnLoan` open no transaction around the audit. `NOT_SUPPORTED` switches the class's read-only default off for them, the audit commits on its own, and a `TransactionTemplate` then wraps the rules and the write:
+
+```java
+@Transactional(propagation = Propagation.NOT_SUPPORTED)   // no transaction around the audit
+public LoanResponse borrow(Long bookId, Long memberId) {
+    audit.record("BORROW_REQUESTED", "book " + bookId + ", member " + memberId);   // commits
+    return transaction.execute(status -> borrowInTransaction(bookId, memberId));   // then this one
+}
+```
+
+One connection at a time: `LoanConnectionPoolIT` runs a borrow and a return with a pool of **one** connection. With `@Transactional` back on `borrow`, both tests fail after 250 ms with `Connection is not available, request timed out`. `REQUIRES_NEW` stays on `record` as the safety net for a caller that does call it inside a transaction.
+
+One consequence, deliberate here and written down in `AuditService`: **it fails closed.** If the audit insert fails, its exception reaches `borrow` before anything else happens: nothing happens unaudited. (The alternative, writing the event after the commit (§5.9), loses it if the application crashes in between, and does not record rejected requests.)
 
 The tests pin each case, and each one failed when the code was broken on purpose:
 
@@ -1684,7 +1694,7 @@ Without the versions, both borrows answered 201 (in each of the two borrow races
 - **Self-invocation, `private` and `final` methods.** The annotation is ignored, silently. Put the method on another bean.
 - **A caught exception can still roll everything back** (rollback-only, above).
 - **Checked exceptions commit.**
-- **`REQUIRES_NEW` holds two connections at once.** With a pool of 10, ten requests that each hold one connection and wait for a second one block each other until the pool times out (30 s) and fails them all. This app does it on every borrow and return (the audit). Keep the inner transaction short, and never nest it in a loop.
+- **`REQUIRES_NEW` holds two connections at once.** With a pool of 10, ten requests that each hold one connection and wait for a second one block each other until the pool times out (30 s) and fails them all. Run the `REQUIRES_NEW` work before the outer transaction starts, as `LoanService` does with the audit (`LoanConnectionPoolIT`); when it must nest, keep the inner transaction short, and never nest it in a loop.
 - **Keep transactions short.** A transaction holds a connection and its row locks until it ends. Do not call a slow HTTP service inside one (§5.9).
 - **`@DataJpaTest` wraps each test in a transaction and rolls it back at the end.** Handy, but nothing inside ever commits: commit behaviour, `REQUIRES_NEW` and races need a test without that transaction, like `TransactionBehaviourIT` and `LoanConcurrencyIT` (`@SpringBootTest`, tables emptied before each test).
 - **Two `@Transactional` annotations exist.** Spring's (`org.springframework.transaction.annotation`) and Jakarta's (`jakarta.transaction.Transactional`). Spring honours both. Jakarta's has the same propagation names except `NESTED` (`@Transactional(TxType.REQUIRES_NEW)`) and `rollbackOn` instead of `rollbackFor`, but no `readOnly`, `isolation` or `timeout`. Use Spring's.
@@ -1911,13 +1921,14 @@ Both plugins run every test of the module before reporting. A failing unit test 
 
 Starting a Spring context (plus a PostgreSQL container) takes seconds. The test framework keeps every context it starts in a cache, keyed by the test's **configuration**: the annotation and its attributes, `@Import`ed classes, active profiles, properties, and every `@MockitoBean`/`@MockitoSpyBean`. Two test classes with the same key share one context; anything different gets a new one.
 
-This suite starts **11 contexts**, so 12 containers: a PostgreSQL in each (one `@Bean` in `TestcontainersConfiguration`), plus a Kafka broker for `LoanKafkaIT` (`KafkaTestcontainersConfiguration`):
+This suite starts **12 contexts**, so 13 containers: a PostgreSQL in each (one `@Bean` in `TestcontainersConfiguration`), plus a Kafka broker for `LoanKafkaIT` (`KafkaTestcontainersConfiguration`):
 
 | Context | Test classes |
 |---|---|
 | `@SpringBootTest` + `@AutoConfigureMockMvc` | `AuthorControllerIT`, `BookControllerIT`, `LoanControllerIT`, `LoanSecurityIT`, `LoanConcurrencyIT`, `MemberControllerIT`, `AuthControllerIT`, `JwtAuthIT`, `LoanEventsIT`, `ActuatorIT` |
 | `RANDOM_PORT` | `ApiSmokeIT` |
 | plain `@SpringBootTest` | `LibraryApplicationIT` |
+| a connection pool of one | `LoanConnectionPoolIT` |
 | the dev profile (Kafka off) | `DemoDataIT` |
 | Open Library pointed at a stub | `BookImportIT` |
 | Kafka on + a Kafka container | `LoanKafkaIT` |
@@ -2021,7 +2032,7 @@ Security in tests (`@WithMockUser`, `jwt()`, real tokens) is in §5.7.
 
 **Coverage.** `./mvnw verify` writes `spring-app/target/site/jacoco/index.html`: lines and branches per package, class and method, with the source coloured by what ran. JaCoCo's agent rides on the `argLine` that Surefire and Failsafe already pass to their JVMs, and the report runs in `post-integration-test`, so it counts both kinds of test. The agent *appends* to `target/jacoco.exec`, so the report also counts every earlier build since the last `clean`. Run `./mvnw clean verify` when the numbers matter. No threshold is enforced: read the report for untested branches, not for the percentage.
 
-**Time.** A full `./mvnw verify` takes about a minute on the machine this guide was written on (55 s when this section was written, 60 s with the tests of §5.9) (Docker already running, images pulled): `java-core` about 2 s, the `spring-app` unit tests about 10 s, and most of the rest goes on starting the contexts and their containers (9 then; 11 since §5.9's `BookImportIT` and §5.10). At the end of this chapter the report shows about 97 % of lines and 80 % of branches covered.
+**Time.** A full `./mvnw verify` takes about a minute on the machine this guide was written on (55 s when this section was written, 60 s with the tests of §5.9) (Docker already running, images pulled): `java-core` about 2 s, the `spring-app` unit tests about 10 s, and most of the rest goes on starting the contexts and their containers (9 then; 11 since §5.9's `BookImportIT` and §5.10; 12 with §5.6's `LoanConnectionPoolIT`). At the end of this chapter the report shows about 97 % of lines and 80 % of branches covered.
 
 **Where it is in the code:** `spring-app/src/test/java/dev/playground/library/` (`testing/TestDataFactory`, `TestTables`, `TestUsers`, `TestcontainersConfiguration`, `ApiSmokeIT`), `spring-app/src/test/resources/sql/`, the JaCoCo plugin in `spring-app/pom.xml`.
 
@@ -2109,7 +2120,8 @@ Before Boot 4 you wrote the `HttpServiceProxyFactory` bean by hand. Boot picks t
 | 200 with the edition (after the redirect) | `Optional.of(book)`, after one more request per author | 201 |
 | 404 for the ISBN | `Optional.empty()` | 404 |
 | Timeout, refused connection, 5xx, HTML instead of JSON, an empty answer, an edition without a title | `ExternalServiceException` | 502 Bad Gateway |
-| An author without a name (a merged author answers with a redirect record) | That author is left out, with a warning in the log | 201, without that author |
+| An author without a name (a merged author answers with a redirect record), or a 404 for the author (a deleted record) | That author is left out, with a warning in the log | 201, without that author |
+| A timeout or a 5xx for an author | `ExternalServiceException`: no answer is not "no author" | 502 Bad Gateway |
 
 A 502 says "a server I depend on failed": the truth, and a hint that retrying later may work. The cause goes to the log, not to the response. The wrapper also keeps Open Library's JSON shape (`OpenLibraryApi.Edition`, with its `publish_date` text) inside the package: the rest of the code sees our `OpenLibraryBook` record. Open Library's data is uneven. Dates are free text ("August 2, 2005"), so `yearIn` takes the first four-digit number, and some editions list no authors (they sit on the "work", which this project does not read).
 
@@ -2122,7 +2134,7 @@ OpenLibraryBook found = find(isbn13);                 // network, no transaction
 return transaction.execute(status -> save(found));    // short read-write transaction
 ```
 
-`TransactionTemplate` is the programmatic form of `@Transactional`, for when the boundary sits in the middle of a method. `BookImportServiceTest.asksOpenLibraryBeforeOpeningTheTransaction` pins the order with mocks. `BookImportIT` checks the effect on the real stack: it runs the whole import (controller, service, HTTP client against `OpenLibraryStub`, PostgreSQL), and while the stub answers each remote request it reads HikariCP's count of connections in use, which must be 0. Put `@Transactional` on `importBook` and that count becomes 1. Authors are matched by name ("Frank Herbert" from Open Library is the demo data's Frank Herbert); a real catalogue would store Open Library's id in a column and match on that.
+`TransactionTemplate` is the programmatic form of `@Transactional`, for when the boundary sits in the middle of a method. `BookImportServiceTest.asksOpenLibraryBeforeOpeningTheTransaction` pins the order with mocks. `BookImportIT` checks the effect on the real stack: it runs the whole import (controller, service, HTTP client against `OpenLibraryStub`, PostgreSQL), and while the stub answers each remote request it reads HikariCP's count of connections in use, which must be 0. Put `@Transactional` on `importBook` and that count becomes 1. Authors are matched by name ("Frank Herbert" from Open Library is the demo data's Frank Herbert); a real catalogue would store Open Library's id in a column, under a unique constraint, and match on that. Without one, two imports at once that both bring a new author can each create it. Titles and names longer than their columns are cut, counting characters as `varchar(n)` does: `String.length()` counts `char`s, and an emoji is two of them (a surrogate pair), so cutting by `char`s could leave half an emoji (`BookImportServiceTest.aLongTitleIsCutBetweenCharactersNeverInsideOne`).
 
 #### Caching
 
