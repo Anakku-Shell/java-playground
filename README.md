@@ -38,4 +38,4 @@ On PowerShell, use `.\mvnw` instead of `./mvnw`.
 
 ## License
 
-[GPL-3.0](LICENSE)
+The code is licensed under the [MIT License](LICENSE). The documentation in `docs/` is licensed under [CC BY 4.0](docs/LICENSE.md).
